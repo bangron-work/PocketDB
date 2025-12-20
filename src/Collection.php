@@ -7,22 +7,15 @@ namespace PocketDB;
  */
 class Collection
 {
-
     /**
-     * ID Generation Mode Constants
+     * ID Generation Mode Constants.
      */
     public const ID_MODE_AUTO = 'auto';          // Generate UUID v4 automatically
     public const ID_MODE_MANUAL = 'manual';      // Use provided _id only
     public const ID_MODE_PREFIX = 'prefix';      // Generate with prefix
 
-    /**
-     * @var \PocketDB\Database
-     */
     public Database $database;
 
-    /**
-     * @var string
-     */
     public string $name;
 
     /**
@@ -41,21 +34,20 @@ class Collection
     protected int $idCounter = 0;
 
     /**
-     * Hooks storage: event name => list of callables
+     * Hooks storage: event name => list of callables.
+     *
      * @var array<string,array<int,callable>>
      */
     protected array $hooks = [];
 
     /**
-     * In-memory cache of documents for this collection (decoded)
-     * @var array|null
+     * In-memory cache of documents for this collection (decoded).
      */
     protected ?array $cache = null;
 
     /**
-     * Constructor
+     * Constructor.
      *
-     * @param string $name
      * @param object $database
      */
     public function __construct(string $name, Database $database)
@@ -65,47 +57,43 @@ class Collection
     }
 
     /**
-     * Set ID generation mode to AUTO (UUID v4)
-     *
-     * @return self
+     * Set ID generation mode to AUTO (UUID v4).
      */
     public function setIdModeAuto(): self
     {
         $this->idMode = self::ID_MODE_AUTO;
         $this->idPrefix = null;
+
         return $this;
     }
 
     /**
-     * Set ID generation mode to MANUAL (use provided _id)
-     *
-     * @return self
+     * Set ID generation mode to MANUAL (use provided _id).
      */
     public function setIdModeManual(): self
     {
         $this->idMode = self::ID_MODE_MANUAL;
         $this->idPrefix = null;
+
         return $this;
     }
 
     /**
-     * Set ID generation mode to PREFIX (auto with prefix)
+     * Set ID generation mode to PREFIX (auto with prefix).
      *
      * @param string $prefix Prefix for generated IDs (e.g., 'USR', 'PRD', 'ORD')
-     * @return self
      */
     public function setIdModePrefix(string $prefix): self
     {
         $this->idMode = self::ID_MODE_PREFIX;
         $this->idPrefix = $prefix;
         $this->_initializeCounter();
+
         return $this;
     }
 
     /**
-     * Get current ID mode
-     *
-     * @return string
+     * Get current ID mode.
      */
     public function getIdMode(): string
     {
@@ -113,13 +101,13 @@ class Collection
     }
 
     /**
-     * Initialize counter for prefix mode
+     * Initialize counter for prefix mode.
      */
     private function _initializeCounter(): void
     {
         // Get highest number from existing IDs with this prefix
         if ($this->idPrefix) {
-            $prefixPattern = $this->idPrefix . '-';
+            $prefixPattern = $this->idPrefix.'-';
             $sql = "SELECT document FROM {$this->name} ORDER BY id DESC LIMIT 1";
 
             try {
@@ -142,16 +130,15 @@ class Collection
     }
 
     /**
-     * Generate ID based on current mode
-     *
-     * @return string|null
+     * Generate ID based on current mode.
      */
     protected function _generateId(): ?string
     {
         switch ($this->idMode) {
             case self::ID_MODE_PREFIX:
                 $this->idCounter++;
-                return $this->idPrefix . '-' . str_pad($this->idCounter, 6, '0', STR_PAD_LEFT);
+
+                return $this->idPrefix.'-'.str_pad($this->idCounter, 6, '0', STR_PAD_LEFT);
 
             case self::ID_MODE_MANUAL:
                 return null; // Will be checked in _insert
@@ -163,7 +150,7 @@ class Collection
     }
 
     /**
-     * Drop collection
+     * Drop collection.
      */
     public function drop()
     {
@@ -171,9 +158,8 @@ class Collection
     }
 
     /**
-     * Insert many documents
+     * Insert many documents.
      *
-     * @param array $documents
      * @return count of inserted documents for arrays
      */
     public function insertMany(array $documents): int
@@ -182,34 +168,34 @@ class Collection
     }
 
     /**
-     * Insert document
+     * Insert document.
      *
-     * @param  array $document
      * @return mixed last_insert_id for single document or
-     * count count of inserted documents for arrays
+     *               count count of inserted documents for arrays
      */
     public function insert(array $document = [])
     {
-
         if (isset($document[0])) {
-
             $this->database->connection->beginTransaction();
 
             try {
                 foreach ($document as $doc) {
-
-                    if (!\is_array($doc)) continue;
+                    if (!\is_array($doc)) {
+                        continue;
+                    }
 
                     $res = $this->_insert($doc);
 
                     if (!$res) {
                         // Failure - roll back and return
                         $this->database->connection->rollBack();
+
                         return $res;
                     }
                 }
 
                 $this->database->connection->commit();
+
                 return \count($document);
             } catch (\Throwable $e) {
                 if ($this->database->connection && $this->database->connection->inTransaction()) {
@@ -223,14 +209,10 @@ class Collection
     }
 
     /**
-     * Insert document
-     *
-     * @param  array $document
-     * @return mixed
+     * Insert document.
      */
     protected function _insert(array $document): mixed
     {
-
         $table = $this->name;
         $doc = $document;
 
@@ -239,7 +221,9 @@ class Collection
         if (!empty($this->hooks['beforeInsert'])) {
             foreach ($this->hooks['beforeInsert'] as $h) {
                 $ret = $h($doc);
-                if (is_array($ret)) $doc = $ret;
+                if (is_array($ret)) {
+                    $doc = $ret;
+                }
             }
         }
 
@@ -256,7 +240,7 @@ class Collection
 
         $encoded = \json_encode($doc, JSON_UNESCAPED_UNICODE);
         if (json_last_error() !== JSON_ERROR_NONE) {
-            throw new \RuntimeException('JSON encode error: ' . json_last_error_msg());
+            throw new \RuntimeException('JSON encode error: '.json_last_error_msg());
         }
 
         $data = ['document' => $encoded];
@@ -287,38 +271,34 @@ class Collection
             }
             // flush collection cache on write
             $this->flushCache();
+
             return $doc['_id'];
         } else {
-            trigger_error('SQL Error: ' . \implode(', ', $this->database->connection->errorInfo()) . ":\n" . $sql);
+            trigger_error('SQL Error: '.\implode(', ', $this->database->connection->errorInfo()).":\n".$sql);
+
             return false;
         }
     }
 
     /**
-     * Save document
-     *
-     * @param  array $document
-     * @return mixed
+     * Save document.
      */
     public function save(array $document, bool $create = false): mixed
     {
-
         // Use a single upsert-style SQL statement to avoid race conditions
         if (isset($document['_id'])) {
-
             $json = json_encode($document, JSON_UNESCAPED_UNICODE);
             if (json_last_error() !== JSON_ERROR_NONE) {
-                throw new \RuntimeException('JSON encode error: ' . json_last_error_msg());
+                throw new \RuntimeException('JSON encode error: '.json_last_error_msg());
             }
 
             // Try to perform an INSERT that will update the existing row if present
             $critId = $this->database->registerCriteriaFunction(['_id' => $document['_id']]);
 
-            $sql = 'INSERT INTO ' . $this->name . ' (id, document) VALUES '
-                . '((SELECT id FROM ' . $this->name . ' WHERE document_criteria("' . $critId . '", document) LIMIT 1), '
-                . $this->database->connection->quote($json) . ') '
-                . 'ON CONFLICT(id) DO UPDATE SET document=' . $this->database->connection->quote($json);
-
+            $sql = 'INSERT INTO '.$this->name.' (id, document) VALUES '
+                .'((SELECT id FROM '.$this->name.' WHERE document_criteria("'.$critId.'", document) LIMIT 1), '
+                .$this->database->connection->quote($json).') '
+                .'ON CONFLICT(id) DO UPDATE SET document='.$this->database->connection->quote($json);
 
             $res = $this->database->connection->exec($sql);
 
@@ -328,7 +308,8 @@ class Collection
 
             if ($res === false) {
                 // If there is an SQL error, fallback to previous behavior
-                trigger_error('SQL Error: ' . implode(', ', $this->database->connection->errorInfo()) . "\n" . $sql);
+                trigger_error('SQL Error: '.implode(', ', $this->database->connection->errorInfo())."\n".$sql);
+
                 return false;
             }
 
@@ -339,11 +320,7 @@ class Collection
     }
 
     /**
-     * Update documents
-     *
-     * @param  mixed $criteria
-     * @param  array $data
-     * @return integer
+     * Update documents.
      */
     public function update($criteria, array $data, bool $merge = true): int
     {
@@ -352,20 +329,28 @@ class Collection
             foreach ($this->hooks['beforeUpdate'] as $h) {
                 $ret = $h($criteria, $data);
                 if (is_array($ret)) {
-                    if (isset($ret['criteria'])) $criteria = $ret['criteria'];
-                    if (isset($ret['data'])) $data = $ret['data'];
+                    if (isset($ret['criteria'])) {
+                        $criteria = $ret['criteria'];
+                    }
+                    if (isset($ret['data'])) {
+                        $data = $ret['data'];
+                    }
                     // also support numeric-indexed [criteria,data]
-                    if (isset($ret[0])) $criteria = $ret[0];
-                    if (isset($ret[1])) $data = $ret[1];
+                    if (isset($ret[0])) {
+                        $criteria = $ret[0];
+                    }
+                    if (isset($ret[1])) {
+                        $data = $ret[1];
+                    }
                 }
             }
         }
 
         if (is_array($criteria) && $this->_isSimpleEqualityCriteria($criteria)) {
             $where = $this->_buildJsonWhere($criteria);
-            $sql = 'SELECT id, document FROM ' . $this->name . ' WHERE ' . $where;
+            $sql = 'SELECT id, document FROM '.$this->name.' WHERE '.$where;
         } else {
-            $sql = 'SELECT id, document FROM ' . $this->name . ' WHERE document_criteria("' . $this->database->registerCriteriaFunction($criteria) . '", document)';
+            $sql = 'SELECT id, document FROM '.$this->name.' WHERE document_criteria("'.$this->database->registerCriteriaFunction($criteria).'", document)';
         }
 
         $stmt = $this->database->connection->query($sql);
@@ -396,7 +381,7 @@ class Collection
                 continue;
             }
 
-            $sql = 'UPDATE ' . $this->name . ' SET document=' . $this->database->connection->quote($encoded) . ' WHERE id=' . $doc['id'];
+            $sql = 'UPDATE '.$this->name.' SET document='.$this->database->connection->quote($encoded).' WHERE id='.$doc['id'];
 
             $this->database->connection->exec($sql);
 
@@ -413,25 +398,26 @@ class Collection
         }
 
         $updated = count($result);
-        if ($updated > 0) $this->flushCache();
+        if ($updated > 0) {
+            $this->flushCache();
+        }
+
         return $updated;
     }
 
     /**
-     * Remove documents
+     * Remove documents.
      *
-     * @param  mixed $criteria
      * @return mixed
      */
     public function remove($criteria): int
     {
-
         // Fetch matching rows so we can run hooks per-document
         if (is_array($criteria) && $this->_isSimpleEqualityCriteria($criteria)) {
             $where = $this->_buildJsonWhere($criteria);
-            $sql = 'SELECT id, document FROM ' . $this->name . ' WHERE ' . $where;
+            $sql = 'SELECT id, document FROM '.$this->name.' WHERE '.$where;
         } else {
-            $sql = 'SELECT id, document FROM ' . $this->name . ' WHERE document_criteria("' . $this->database->registerCriteriaFunction($criteria) . '", document)';
+            $sql = 'SELECT id, document FROM '.$this->name.' WHERE document_criteria("'.$this->database->registerCriteriaFunction($criteria).'", document)';
         }
 
         $stmt = $this->database->connection->query($sql);
@@ -458,12 +444,14 @@ class Collection
                 }
             }
 
-            if ($skip) continue;
+            if ($skip) {
+                continue;
+            }
 
             // perform deletion by id
-            $delSql = 'DELETE FROM ' . $this->name . ' WHERE id=' . $row['id'];
+            $delSql = 'DELETE FROM '.$this->name.' WHERE id='.$row['id'];
             $this->database->connection->exec($delSql);
-            $deleted++;
+            ++$deleted;
 
             // afterRemove hooks
             if (!empty($this->hooks['afterRemove'])) {
@@ -476,26 +464,24 @@ class Collection
             }
         }
 
-        if ($deleted > 0) $this->flushCache();
+        if ($deleted > 0) {
+            $this->flushCache();
+        }
+
         return $deleted;
     }
 
     /**
-     * Count documents in collections
-     *
-     * @param  mixed $criteria
-     * @return integer
+     * Count documents in collections.
      */
     public function count($criteria = null): int
     {
-
         return $this->find($criteria)->count();
     }
 
     /**
-     * Find documents
+     * Find documents.
      *
-     * @param  mixed $criteria
      * @return object Cursor
      */
     public function find($criteria = null, $projection = null): Cursor
@@ -505,6 +491,7 @@ class Collection
             $where = $this->_buildJsonWhere($criteria);
             // still register criteria function id for compatibility
             $critId = $this->database->registerCriteriaFunction($criteria);
+
             return new Cursor($this, $critId, $projection, $where);
         }
 
@@ -512,26 +499,33 @@ class Collection
     }
 
     /**
-     * Detect simple equality criteria (no $ operators)
+     * Detect simple equality criteria (no $ operators).
      */
     private function _isSimpleEqualityCriteria($criteria): bool
     {
-        if (!is_array($criteria)) return false;
-        foreach ($criteria as $k => $v) {
-            if (strpos($k, '$') === 0) return false;
-            if (is_array($v)) return false;
+        if (!is_array($criteria)) {
+            return false;
         }
+        foreach ($criteria as $k => $v) {
+            if (strpos($k, '$') === 0) {
+                return false;
+            }
+            if (is_array($v)) {
+                return false;
+            }
+        }
+
         return true;
     }
 
     /**
-     * Build SQL WHERE clause using json_extract for simple equality criteria
+     * Build SQL WHERE clause using json_extract for simple equality criteria.
      */
     private function _buildJsonWhere(array $criteria): string
     {
         $parts = [];
         foreach ($criteria as $key => $value) {
-            $path = '$.' . str_replace("'", "\\'", $key);
+            $path = '$.'.str_replace("'", "\\'", $key);
 
             if (is_int($value) || is_float($value) || (is_string($value) && is_numeric($value))) {
                 $val = $value;
@@ -539,23 +533,20 @@ class Collection
                 // Use numeric boolean representation for comparison
                 $val = $value ? '1' : '0';
             } else {
-                $val = $this->database->connection->quote((string)$value);
+                $val = $this->database->connection->quote((string) $value);
             }
 
-            $parts[] = "json_extract(document, '" . $path . "') = " . $val;
+            $parts[] = "json_extract(document, '".$path."') = ".$val;
         }
+
         return implode(' AND ', $parts);
     }
 
     /**
-     * Find one document
-     *
-     * @param  mixed $criteria
-     * @return array
+     * Find one document.
      */
     public function findOne($criteria = null, $projection = null): ?array
     {
-
         $items = $this->find($criteria, $projection)->limit(1)->toArray();
 
         return isset($items[0]) ? $items[0] : null;
@@ -563,26 +554,33 @@ class Collection
 
     /**
      * Register an event hook for this collection.
-     * Events: beforeInsert, afterInsert, beforeUpdate
+     * Events: beforeInsert, afterInsert, beforeUpdate.
      */
     public function on(string $event, callable $fn): void
     {
-        if (!isset($this->hooks[$event])) $this->hooks[$event] = [];
+        if (!isset($this->hooks[$event])) {
+            $this->hooks[$event] = [];
+        }
         $this->hooks[$event][] = $fn;
     }
 
     /**
      * Remove hooks for an event. If $fn is null removes all listeners.
      */
-    public function off(string $event, callable $fn = null): void
+    public function off(string $event, ?callable $fn = null): void
     {
-        if (!isset($this->hooks[$event])) return;
+        if (!isset($this->hooks[$event])) {
+            return;
+        }
         if ($fn === null) {
             unset($this->hooks[$event]);
+
             return;
         }
         foreach ($this->hooks[$event] as $k => $h) {
-            if ($h === $fn) unset($this->hooks[$event][$k]);
+            if ($h === $fn) {
+                unset($this->hooks[$event][$k]);
+            }
         }
         $this->hooks[$event] = array_values($this->hooks[$event]);
     }
@@ -606,7 +604,9 @@ class Collection
         foreach ($documents as $d) {
             if (isset($d[$localField])) {
                 if (is_array($d[$localField])) {
-                    foreach ($d[$localField] as $v) $keys[] = $v;
+                    foreach ($d[$localField] as $v) {
+                        $keys[] = $v;
+                    }
                 } else {
                     $keys[] = $d[$localField];
                 }
@@ -614,11 +614,15 @@ class Collection
         }
         $keys = array_values(array_unique($keys));
 
-        if (empty($keys)) return $single ? $documents[0] : $documents;
+        if (empty($keys)) {
+            return $single ? $documents[0] : $documents;
+        }
 
         // resolve client and target collection
         $client = $this->database->client ?? null;
-        if (!$client) throw new \RuntimeException('Client not available for populate');
+        if (!$client) {
+            throw new \RuntimeException('Client not available for populate');
+        }
 
         $dbName = null;
         $collName = $foreign;
@@ -645,7 +649,9 @@ class Collection
             } elseif (is_array($value)) {
                 $arr = [];
                 foreach ($value as $v) {
-                    if (isset($map[$v])) $arr[] = $map[$v];
+                    if (isset($map[$v])) {
+                        $arr[] = $map[$v];
+                    }
                 }
                 $copy[$as ?? $collName] = $arr;
             } else {
@@ -658,17 +664,14 @@ class Collection
     }
 
     /**
-     * Rename Collection
+     * Rename Collection.
      *
-     * @param  string $newname [description]
-     * @return boolean
+     * @param string $newname [description]
      */
     public function renameCollection($newname): bool
     {
-
         if (!in_array($newname, $this->database->getCollectionNames())) {
-
-            $this->database->connection->exec('ALTER TABLE ' . $this->name . ' RENAME TO ' . $newname);
+            $this->database->connection->exec('ALTER TABLE '.$this->name.' RENAME TO '.$newname);
 
             $this->name = $newname;
 
@@ -679,20 +682,24 @@ class Collection
     }
 
     /**
-     * Load all documents into memory cache (decoded)
+     * Load all documents into memory cache (decoded).
      */
     private function load(): array
     {
-        if ($this->cache !== null) return $this->cache;
+        if ($this->cache !== null) {
+            return $this->cache;
+        }
 
         $this->cache = [];
-        $sql = 'SELECT document FROM ' . $this->name;
+        $sql = 'SELECT document FROM '.$this->name;
         try {
             $stmt = $this->database->connection->query($sql);
             $rows = $stmt ? $stmt->fetchAll(\PDO::FETCH_ASSOC) : [];
             foreach ($rows as $r) {
                 $doc = json_decode($r['document'], true);
-                if (json_last_error() === JSON_ERROR_NONE && is_array($doc)) $this->cache[] = $doc;
+                if (json_last_error() === JSON_ERROR_NONE && is_array($doc)) {
+                    $this->cache[] = $doc;
+                }
             }
         } catch (\Throwable $_) {
             $this->cache = [];
@@ -702,7 +709,7 @@ class Collection
     }
 
     /**
-     * Flush in-memory cache (call after writes)
+     * Flush in-memory cache (call after writes).
      */
     private function flushCache(): void
     {
