@@ -73,24 +73,26 @@ class Database
             }
 
             $document = \json_decode($document, true);
-            $val      = '';
+
+            if ($document === null || !is_array($document)) {
+                return '';
+            }
+
+            $val = '';
 
             if (strpos($key, '.') !== false) {
-
                 $keys = \explode('.', $key);
-
-                switch (\count($keys)) {
-                    case 2:
-                        $val = isset($document[$keys[0]][$keys[1]]) ? $document[$keys[0]][$keys[1]] : '';
+                $ref = $document;
+                foreach ($keys as $k) {
+                    if (!is_array($ref) || !array_key_exists($k, $ref)) {
+                        $ref = null;
                         break;
-                    case 3:
-                        $val = isset($document[$keys[0]][$keys[1]][$keys[2]]) ? $document[$keys[0]][$keys[1]][$keys[2]] : '';
-                        break;
-                    default:
-                        $val = isset($document[$keys[0]]) ? $document[$keys[0]] : '';
+                    }
+                    $ref = $ref[$k];
                 }
+                $val = $ref ?? '';
             } else {
-                $val = isset($document[$key]) ? $document[$key] : '';
+                $val = array_key_exists($key, $document) ? $document[$key] : '';
             }
 
             return \is_array($val) || \is_object($val) ? \json_encode($val) : $val;

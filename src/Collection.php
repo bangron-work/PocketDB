@@ -47,6 +47,12 @@ class Collection
     protected array $hooks = [];
 
     /**
+     * In-memory cache of documents for this collection (decoded)
+     * @var array|null
+     */
+    protected ?array $cache = null;
+
+    /**
      * Constructor
      *
      * @param string $name
@@ -248,7 +254,12 @@ class Collection
             $doc['_id'] = $generated_id;
         }
 
-        $data = ['document' => \json_encode($doc, JSON_UNESCAPED_UNICODE)];
+        $encoded = \json_encode($doc, JSON_UNESCAPED_UNICODE);
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            throw new \RuntimeException('JSON encode error: ' . json_last_error_msg());
+        }
+
+        $data = ['document' => $encoded];
 
         $fields = [];
         $values = [];
@@ -274,6 +285,8 @@ class Collection
                     }
                 }
             }
+            // flush collection cache on write
+            $this->flushCache();
             return $doc['_id'];
         } else {
             trigger_error('SQL Error: ' . \implode(', ', $this->database->connection->errorInfo()) . ":\n" . $sql);
@@ -294,6 +307,9 @@ class Collection
         if (isset($document['_id'])) {
 
             $json = json_encode($document, JSON_UNESCAPED_UNICODE);
+            if (json_last_error() !== JSON_ERROR_NONE) {
+                throw new \RuntimeException('JSON encode error: ' . json_last_error_msg());
+            }
 
             // Try to perform an INSERT that will update the existing row if present
             $critId = $this->database->registerCriteriaFunction(['_id' => $document['_id']]);
@@ -303,7 +319,12 @@ class Collection
                 . $this->database->connection->quote($json) . ') '
                 . 'ON CONFLICT(id) DO UPDATE SET document=' . $this->database->connection->quote($json);
 
+
             $res = $this->database->connection->exec($sql);
+
+            if ($res !== false) {
+                $this->flushCache();
+            }
 
             if ($res === false) {
                 // If there is an SQL error, fallback to previous behavior
@@ -369,7 +390,13 @@ class Collection
                 }
             }
 
-            $sql = 'UPDATE ' . $this->name . ' SET document=' . $this->database->connection->quote(json_encode($document, JSON_UNESCAPED_UNICODE)) . ' WHERE id=' . $doc['id'];
+            $encoded = json_encode($document, JSON_UNESCAPED_UNICODE);
+            if (json_last_error() !== JSON_ERROR_NONE) {
+                // skip this document update if encoding fails
+                continue;
+            }
+
+            $sql = 'UPDATE ' . $this->name . ' SET document=' . $this->database->connection->quote($encoded) . ' WHERE id=' . $doc['id'];
 
             $this->database->connection->exec($sql);
 
@@ -385,7 +412,9 @@ class Collection
             }
         }
 
-        return count($result);
+        $updated = count($result);
+        if ($updated > 0) $this->flushCache();
+        return $updated;
     }
 
     /**
@@ -447,6 +476,7 @@ class Collection
             }
         }
 
+        if ($deleted > 0) $this->flushCache();
         return $deleted;
     }
 
@@ -646,5 +676,36 @@ class Collection
         }
 
         return false;
+    }
+
+    /**
+     * Load all documents into memory cache (decoded)
+     */
+    private function load(): array
+    {
+        if ($this->cache !== null) return $this->cache;
+
+        $this->cache = [];
+        $sql = 'SELECT document FROM ' . $this->name;
+        try {
+            $stmt = $this->database->connection->query($sql);
+            $rows = $stmt ? $stmt->fetchAll(\PDO::FETCH_ASSOC) : [];
+            foreach ($rows as $r) {
+                $doc = json_decode($r['document'], true);
+                if (json_last_error() === JSON_ERROR_NONE && is_array($doc)) $this->cache[] = $doc;
+            }
+        } catch (\Throwable $_) {
+            $this->cache = [];
+        }
+
+        return $this->cache;
+    }
+
+    /**
+     * Flush in-memory cache (call after writes)
+     */
+    private function flushCache(): void
+    {
+        $this->cache = null;
     }
 }

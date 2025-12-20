@@ -81,6 +81,11 @@ class Client
     public function selectDB(string $name): Database
     {
 
+        // Validate database name to avoid path traversal or invalid names
+        if ($name !== Database::DSN_PATH_MEMORY && !preg_match('/^[a-z0-9_-]+$/i', $name)) {
+            throw new \InvalidArgumentException('Invalid database name');
+        }
+
         if (!isset($this->databases[$name])) {
             $this->databases[$name] = new Database(
                 $this->path === Database::DSN_PATH_MEMORY ? $this->path : sprintf('%s/%s.sqlite', $this->path, $name),
@@ -93,6 +98,18 @@ class Client
         }
 
         return $this->databases[$name];
+    }
+
+    /**
+     * Helper to fetch nested values using dot notation from arrays.
+     */
+    private function getValueByDot(array $data, string $path)
+    {
+        foreach (explode('.', $path) as $key) {
+            if (!is_array($data) || !array_key_exists($key, $data)) return null;
+            $data = $data[$key];
+        }
+        return $data;
     }
 
     public function __get(string $database): Database

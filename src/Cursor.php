@@ -5,7 +5,7 @@ namespace PocketDB;
 /**
  * Cursor object.
  */
-class Cursor implements \Iterator
+class Cursor implements \IteratorAggregate
 {
 
     /**
@@ -301,6 +301,18 @@ class Cursor implements \Iterator
     public function valid()
     {
         return $this->currentRow !== null;
+    }
+
+    /**
+     * Provide a PHP native iterator to allow foreach() safely.
+     */
+    public function getIterator(): \Traversable
+    {
+        $this->rewind();
+        while ($this->valid()) {
+            yield $this->current();
+            $this->next();
+        }
     }
 
     /**
