@@ -1,369 +1,195 @@
 # PocketDB
 
-[![Latest Version](https://img.shields.io/packagist/v/bangron-work/pocketdb.svg?style=flat-square)](https://packagist.org/packages/bangron-work/pocketdb)
-[![PHP Version](https://img.shields.io/packagist/php-v/bangron-work/pocketdb.svg?style=flat-square)](https://php.net/)
-[![License](https://img.shields.io/github/license/bangron-work/pocketdb.svg?style=flat-square)](https://github.com/bangron-work/pocketdb/blob/main/LICENSE)
+**PocketDB** is a lightweight, serverless NoSQL database library for PHP, built on top of the robust **SQLite** engine. It combines the flexibility of JSON document storage with the reliability, speed, and ACID properties of SQLite.
 
-PocketDB adalah pustaka PHP ringan yang menghadirkan API mirip MongoDB di atas SQLite. Library ini menyimpan dokumen JSON dalam tabel SQLite dan menyediakan fungsi query serta utilitas untuk pengembangan aplikasi kecil hingga menengah.
+Ideal for applications that need a MongoDB-like API without the overhead of maintaining a separate database server.
 
-## 🚀 Fitur Utama
+## 🚀 Features
 
-- **API Sederhana**: Mirip MongoDB dengan `Client`, `Database`, `Collection`, dan `Cursor`
-- **Dokumen JSON**: Penyimpanan fleksibel dengan dukungan schema-less
-- **Kinerja Tinggi**: Menggunakan SQLite sebagai backend yang cepat dan andal
-- **Query Lengkap**: Dukungan operator seperti `$gt`, `$lt`, `$in`, `$exists`, dll.
-- **Indeks JSON**: Optimasi query dengan indeks pada field JSON
-- **Transaksi**: Dukungan penuh untuk operasi atomik
-- **Hooks & Events**: Fleksibel dengan siklus hidup dokumen
-- **Multi-database**: Dukungan untuk beberapa database dalam satu aplikasi
+- **NoSQL API**: Insert, update, and query JSON documents using a MongoDB-like syntax.
+- **Serverless**: Runs directly on SQLite (supports both file-based and `:memory:` storage).
+- **Event-Driven Hooks**: Powerful `on('beforeInsert', ...)` system for validation, triggers, and logic.
+- **🔒 Encryption**: Built-in AES-256-CBC encryption for documents.
+- **Searchable Encryption**: Ability to index and search specific fields even within encrypted documents.
+- **Relationships**: `populate` helper to join documents across collections or different databases.
+- **Flexible IDs**: Supports UUID v4, Auto-Increment Prefixes (e.g., `ORD-001`), or Manual IDs.
+- **Zero Configuration**: Just require and run.
 
-## 📦 Persyaratan
-
-- PHP 8.0 atau lebih tinggi
-- Ekstensi `pdo_sqlite` aktif
-- Composer untuk manajemen dependensi
-
-## 🔧 Instalasi
+## 📦 Installation
 
 ```bash
 composer require bangron-work/pocketdb
+
 ```
 
-## 🚀 Memulai Cepat
+## ⚡ Quick Start
 
-### Koneksi ke Database
+### Basic Usage
 
 ```php
-require 'vendor/autoload.php';
-
 use PocketDB\Client;
 
-// Buat instance client dengan direktori penyimpanan
-$client = new Client(__DIR__.'/data');
+// Initialize (creates 'my_database.sqlite' if it doesn't exist)
+$client = new Client(__DIR__ . '/data');
+$db = $client->my_database;
 
-// Pilih database (akan dibuat jika belum ada)
-$db = $client->selectDB('aplikasi_saya');
+// Access a collection (table)
+$users = $db->users;
 
-// Pilih koleksi (seperti tabel)
-$produk = $db->selectCollection('produk');
-```
-
-### Operasi Dasar
-
-#### Menyisipkan Dokumen
-
-```php
-// Menyisipkan satu dokumen
-$id = $produk->insert([
-    'nama' => 'Laptop Gaming',
-    'harga' => 12000000,
-    'stok' => 15,
-    'spesifikasi' => [
-        'prosesor' => 'Intel i7',
-        'ram' => '16GB',
-        'storage' => '512GB SSD'
-    ],
-    'tags' => ['elektronik', 'laptop', 'gaming']
+// 1. Insert a document
+$userId = $users->insert([
+    'username' => 'johndoe',
+    'email'    => 'john@example.com',
+    'profile'  => [
+        'age'  => 28,
+        'city' => 'Jakarta'
+    ]
 ]);
 
-echo "ID dokumen yang disimpan: $id";
+// 2. Find a document
+$user = $users->findOne(['username' => 'johndoe']);
+
+// 3. Update a document (using dot notation)
+$users->update(
+    ['_id' => $userId],
+    ['profile.city' => 'Bandung']
+);
+
+// 4. Delete
+$users->remove(['_id' => $userId]);
+
 ```
 
-#### Mencari Dokumen
+---
+
+## 🔥 Advanced Features
+
+### 1. Event Hooks (`on`)
+
+PocketDB allows you to intercept operations. This is perfect for validation, data mutation, or triggering side effects (logging, email, etc.).
+
+Supported events: `beforeInsert`, `afterInsert`, `beforeUpdate`, `afterUpdate`, `beforeRemove`, `afterRemove`.
 
 ```php
-// Mencari satu dokumen
-$laptop = $produk->findOne(['nama' => 'Laptop Gaming']);
+// Example: Validate stock before order insertion
+$db->orders->on('beforeInsert', function (&$order) use ($db) {
+    $product = $db->products->findOne(['_id' => $order['product_id']]);
 
-// Mencari banyak dokumen dengan filter
-$produkMahal = $produk->find([
-    'harga' => ['$gt' => 10000000]
-])->toArray();
+    // Validation
+    if ($product['stock'] < $order['qty']) {
+        return false; // Cancel insertion
+    }
 
-// Pencarian teks (case-insensitive)
-$hasilPencarian = $produk->find([
-    'nama' => ['$regex' => 'gaming', '$options' => 'i']
+    // Mutation: Calculate total automatically
+    $order['total_price'] = $product['price'] * $order['qty'];
+    $order['created_at']  = date('Y-m-d H:i:s');
+
+    return $order; // Return the modified document
+});
+
+// Example: Update ledger after successful order
+$db->orders->on('afterInsert', function ($order) use ($db) {
+    $db->ledger->insert([
+        'description' => 'Sales Order ' . $order['_id'],
+        'amount'      => $order['total_price'],
+        'type'        => 'CREDIT'
+    ]);
+});
+
+```
+
+### 2. Encryption & Privacy
+
+You can encrypt entire documents (except `_id`). You can also configure specific fields to be "Searchable" (hashed or plain) so you can still query them despite encryption.
+
+```php
+// 1. Initialize with an encryption key
+$db = $client->selectDB('secure_db', [
+    'encryption_key' => 'your-secret-32-char-key-here'
 ]);
+
+// 2. Configure searchable fields
+// 'email' will be hashed (secure search, exact match only)
+// 'role' will be plain text (allows LIKE/Regex search)
+$db->users->setSearchableFields([
+    'email' => ['hash' => true],
+    'role'  => ['hash' => false]
+]);
+
+// 3. Insert (Data is stored encrypted on disk)
+$db->users->insert(['email' => 'ceo@company.com', 'role' => 'admin', 'salary' => 50000]);
+
+// 4. You can still find it!
+$user = $db->users->findOne(['email' => 'ceo@company.com']);
+// Output: Decrypted document
+
 ```
 
-#### Memperbarui Dokumen
+### 3. Relationships (Populate)
+
+Join data from different collections (similar to SQL JOIN or Mongoose Populate).
 
 ```php
-// Update satu dokumen
-$produk->update(
-    ['_id' => $id],
-    ['$set' => ['stok' => 10]]
+// Assume we have 'orders' containing 'customer_id'
+$orders = $db->orders->find()->toArray();
+
+// Populate user data into 'customer_details' field
+$results = $db->orders->populate(
+    $orders,           // Source data
+    'customer_id',     // Foreign key in 'orders'
+    'users',           // Target collection name
+    '_id',             // Primary key in 'users'
+    'customer_details' // Output field name
 );
 
-// Update banyak dokumen
-$produk->update(
-    ['kategori' => 'elektronik'],
-    ['$inc' => ['harga' => 500000]], // Naikkan harga 500.000
-    ['multiple' => true]
-);
 ```
 
-#### Menghapus Dokumen
+### 4. Querying & Cursors
+
+Use a fluent chainable API for advanced queries.
 
 ```php
-// Hapus satu dokumen
-$produk->remove(['_id' => $id]);
+$results = $db->products->find([
+        'price' => ['$gte' => 1000000],   // Price >= 1M
+        'tags'  => ['$in' => ['promo', 'new']] // Tag is in array
+    ])
+    ->sort(['price' => -1]) // Sort Descending
+    ->limit(10)
+    ->skip(0)
+    ->toArray();
 
-// Hapus banyak dokumen
-$produk->remove(['stok' => 0]);
 ```
 
-## 📚 Dokumentasi Lengkap
+**Supported Operators:**
+`$eq`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$exists`, `$regex`, `$fuzzy`.
 
-Lihat [dokumentasi lengkap](docs/index.md) untuk informasi lebih lanjut tentang:
+### 5. ID Management
 
-- [Panduan Penggunaan](docs/guides/getting-started.md)
-- [Referensi API](docs/api/collection.md)
-- [Indeks dan Optimasi](docs/guides/indexes.md)
-- [Transaksi](docs/guides/transactions.md)
-- [Integrasi Framework](docs/integrations/index.md)
-- [Troubleshooting](docs/troubleshooting/common-issues.md)
-
-## 🔍 Contoh Lengkap
-
-Kunjungi direktori [examples](examples/) untuk contoh kode yang dapat dijalankan:
-
-- [Aplikasi Blog Sederhana](examples/blog/)
-- [REST API dengan Slim Framework](examples/rest-api/)
-- [Integrasi dengan Laravel](examples/laravel/)
-
-## 🛠 Pengembangan
-
-### Menjalankan Pengujian
-
-```bash
-composer test
-```
-
-### Kontribusi
-
-Kontribusi sangat diterima! Silakan buat issue atau pull request.
-
-## 📄 Lisensi
-
-PocketDB dilisensikan di bawah [MIT License](LICENSE).
-
-- Populate (mirip join pada level aplikasi):
+Control how `_id` is generated.
 
 ```php
-$orders = $db->selectCollection('orders');
-$ordersWithUser = $orders->find()->populate('user_id', $users)->toArray();
+// Mode: Auto (Default) -> UUID v4
+$db->logs->setIdModeAuto();
+
+// Mode: Prefix -> 'TRX-000001', 'TRX-000002'
+$db->orders->setIdModePrefix('TRX-');
+
+// Mode: Manual -> You must provide '_id'
+$db->users->setIdModeManual();
+
 ```
 
-- Membuat index JSON untuk mempercepat query pada field tertentu:
+## 🛠 Architecture
 
-```php
-$db->createJsonIndex('users', 'age');
-$db->createJsonIndex('users', 'profile.level');
-```
+- **Client**: Manages the directory of database files.
+- **Database**: Wrapper around `PDO` (SQLite), handles transactions and encryption keys.
+- **Collection**: Handles logic, hooks, ID generation, and query building.
+- **Cursor**: Handles iteration, sorting, pagination, and lazy loading.
 
-Catatan: index dibuat dengan `json_extract(document, '$.field')` sehingga query yang memakai field tersebut dapat menggunakan index.
+## 📄 License
 
-## Operator Query yang Didukung
+MIT License. See [LICENSE](https://www.google.com/search?q=LICENSE) for more information.
 
-- Persamaan: `['name' => 'Alice']`
-- Pembanding: `['age' => ['$gt' => 20]]`, `$gte`, `$lt`, `$lte`
-- Keanggotaan: `['tag' => ['$in' => ['red', 'blue']]]` dan `$nin`
-- Eksistensi: `['field' => ['$exists' => true]]`
+---
 
-Jika sebuah criteria tidak bisa diterjemahkan ke SQL JSON, PocketDB akan menggunakan fungsi callback PHP (`document_criteria`) untuk menilai tiap dokumen — ini lebih fleksibel tapi lebih lambat (karena `json_decode` per baris).
-
-## Tips Performa dan Best Practices
-
-- Gunakan batch insert (`insert($batch)`) untuk throughput tinggi.
-- Buat index pada field yang sering dicari atau dipakai sebagai kondisi.
-- Hindari meletakkan field yang sangat sering diupdate di dalam JSON tunggal jika memungkinkan — pertimbangkan menambah kolom SQL biasa (mis. `last_updated`) di tabel untuk menghindari re-encode JSON setiap update.
-- Jika Anda butuh banyak penulis paralel (high write concurrency), evaluasi apakah SQLite adalah pilihan tepat; untuk sangat banyak penulis, RDBMS server (Postgres/MySQL) lebih cocok.
-
-### Optimasi Save (Upsert)
-
-Sejak pembaruan terakhir, method `save()` diimplementasikan untuk menggunakan pencarian native SQL pada field `_id` sehingga operasi upsert tidak memanggil callback PHP per baris.
-
-- Sebelumnya: `save()` menggunakan `document_criteria(...)` yang memicu decoding JSON dan evaluasi PHP untuk setiap baris — ini sangat mahal pada tabel besar.
-- Sekarang: `save()` memakai subquery seperti `SELECT id FROM <table> WHERE json_extract(document, '$._id') = <value> LIMIT 1` sehingga SQLite dapat menggunakan index JSON jika dibuat.
-
-Rekomendasi:
-
-- Buat index JSON pada `_id` (atau field yang Anda gunakan untuk upsert) sebelum beban produksi:
-
-```php
-$db->createJsonIndex('users', '_id');
-```
-
-- Pastikan Anda memahami tipe `_id` yang digunakan (string vs numerik). Library akan mencoba menangani literal numerik tanpa quoting, dan meng-quote nilai string.
-
-Keuntungan:
-
-- Operasi `save()` menjadi jauh lebih cepat (menghindari callback PHP per-baris).
-- Jika index dibuat, pencarian untuk upsert dan `find(['_id' => ...])` menjadi O(log n) pada level database.
-
-Catatan keamanan:
-
-- Nama field JSON di-build menjadi path `$.field` untuk `json_extract`. Jika nama field datang dari input yang tidak tepercaya, pertimbangkan untuk memvalidasi atau menggunakan whitelist nama field untuk mencegah injection pada path JSON. Saat ini library melakukan escaping sederhana untuk kutipan, tetapi validasi tambahan direkomendasikan untuk penggunaan publik-facing API.
-
-## Concurrency
-
-- PocketDB mengaktifkan WAL (`PRAGMA journal_mode = WAL`) untuk meningkatkan concurrency baca/tulis.
-- Namun, beban update berat oleh banyak writer paralel tetap akan menimbulkan penantian pada level SQLite.
-
-## Debugging & Troubleshooting
-
-- Jika Anda melihat query lambat, cek apakah criteria diterjemahkan ke SQL (lihat `_canTranslateToJsonWhere` di `src/Collection.php`). Jika tidak, pertimbangkan menggunakan field yang dapat diindeks.
-- Jika tabel tidak ada error: pastikan `selectCollection()` dipanggil sebelum membuat indeks, atau gunakan `createCollection()` terlebih dahulu.
-
-## API Ringkas
-
-- `Client($path, $options=[])` — path folder database atau `:memory:` untuk in-memory.
-- `Database` — `attach()`, `detach()`, `createCollection()`, `createJsonIndex()`, `registerCriteriaFunction()`.
-- `Collection` — `insert()`, `insertMany()`, `find()`, `findOne()`, `update()`, `remove()`, `count()`, `save()`, `drop()`, `createIndex()`.
-- `Cursor` — `limit()`, `skip()`, `sort()`, `populate()`, `toArray()`, `count()`.
-
-## Contoh Praktis: Index + Query Cepat
-
-```php
-$db->createJsonIndex('users', 'email');
-$fast = $users->find(['email' => 'alice@example.com'])->toArray();
-```
-
-## Benchmark & Tools
-
-- Ada skrip benchmark di `tools/stress_benchmark.php` untuk mengukur throughput insert, query, update, dan index creation. Gunakan dengan hati-hati (dapat membuat file besar pada disk).
-
-## Contributing
-
-- Silakan lihat `CONTRIBUTING.md` untuk panduan kontribusi.
-
-## Lisensi
-
-- Lihat file `LICENSE` untuk detail lisensi.
-
-## Butuh bantuan lebih lanjut?
-
-- Jika Anda mau, saya dapat menambahkan:
-  - Dokumentasi contoh lengkap (folder `examples/`) dengan contoh aplikasi kecil.
-  - Output benchmark otomatis (`results.json`) untuk perbandingan.
-  - Panduan migrasi dari MongoDB-lite ke PocketDB.
-
-Selamat mencoba PocketDB — beri tahu saya jika Anda mau saya siapkan contoh proyek kecil agar bisa langsung dijalankan.
-
-## Ringkasan penting & Referensi
-
-Berikut adalah beberapa referensi cepat dan fitur penting yang sering digunakan:
-
-- Populate (bagian aplikasi-level join):
-
-```php
-$orders = $db->selectCollection('orders');
-$ordersWithUser = $orders->find()->populate('user_id', $users)->toArray();
-```
-
-- Membuat index JSON untuk mempercepat query pada field tertentu:
-
-```php
-$db->createJsonIndex('users', 'age');
-$db->createJsonIndex('users', 'profile.level');
-```
-
-Note: index dibuat dengan `json_extract(document, '$.field')` sehingga query yang memakai field tersebut dapat menggunakan index.
-
-## Operator Query yang Didukung
-
-- Persamaan: `['name' => 'Alice']`
-- Pembanding: `['age' => ['$gt' => 20]]`, `$gte`, `$lt`, `$lte`
-- Keanggotaan: `['tag' => ['$in' => ['red', 'blue']]]` dan `$nin`
-- Eksistensi: `['field' => ['$exists' => true]]`
-
-Jika sebuah criteria tidak dapat diterjemahkan ke SQL JSON, PocketDB akan menggunakan fungsi callback PHP (`document_criteria`) untuk menilai tiap dokumen — ini fleksibel tapi lebih lambat (karena `json_decode` per baris).
-
-## Tips Performa dan Best Practices
-
-- Gunakan batch insert (`insert($batch)`) untuk throughput tinggi.
-- Buat index pada field yang sering dicari atau dipakai sebagai kondisi.
-- Hindari menyimpan field yang sangat sering diupdate hanya di dalam JSON; pertimbangkan kolom SQL terpisah (mis. `last_updated`) untuk mengurangi re-encode JSON.
-- Untuk beban penulisan paralel tinggi, pertimbangkan RDBMS server (Postgres/MySQL) karena SQLite memiliki keterbatasan pada concurrency menulis.
-
-### Optimasi Save (Upsert)
-
-Method `save()` menggunakan subquery `json_extract(...)` pada `_id` sehingga operasi upsert dapat memanfaatkan index JSON dan menghindari evaluasi PHP per-baris.
-
-Rekomendasi:
-
-```php
-$db->createJsonIndex('users', '_id');
-```
-
-## Enkripsi Per-koleksi & Field Searchable
-
-PocketDB mendukung enkripsi aplikasi-level (AES-256-CBC) pada level koleksi. Aktifkan enkripsi per-koleksi dengan `setEncryptionKey()` dan, bila diperlukan, tandai field yang harus tetap dapat dicari melalui `setSearchableFields()`.
-
-- Jika field ditandai sebagai searchable dan `hash=false`, PocketDB menyimpan nilai plain di kolom `si_{field}` sehingga `find(['field'=>value])` tetap bekerja.
-- Jika `hash=true`, PocketDB menyimpan hash SHA-256 dari nilai; pengguna dapat tetap memanggil `find()` dengan nilai plain karena library akan meng-hash kriteria sebelum dijalankan.
-
-Contoh singkat:
-
-```php
-$db = new \PocketDB\Database(':memory:');
-$col = $db->selectCollection('users');
-$col->setEncryptionKey('very-secret-key');
-$col->setSearchableFields(['email'], false);
-$col->insert(['_id'=>'u1','email'=>'alice@example.com','name'=>'Alice']);
-$found = $col->find(['email' => 'alice@example.com'])->toArray();
-```
-
-Lihat `examples/encryption_example.php`, `examples/hashed_search_example.php`, dan tests `tests/EncryptionTest.php` serta `tests/HashedSearchableFieldTest.php`.
-
-## Migrasi: Menghapus kolom `si_{field}`
-
-SQLite tidak mendukung `ALTER TABLE DROP COLUMN`. Repositori menyediakan utilitas migrasi yang melakukan rekonstruksi tabel dengan aman:
-
-`tools/migrate_drop_si.php`
-
-Usage:
-
-```bash
-php tools/migrate_drop_si.php /path/to/db.sqlite collection_name field_name
-```
-
-Lihat juga `docs/migrations/searchable_fields_migration.md` untuk panduan lengkap dan peringatan.
-
-## Benchmark & Tools
-
-- `tools/benchmark_encryption.php`: bandingkan insert/read antara koleksi terenkripsi dan plain.
-- `tools/stress_benchmark.php`: skrip benchmark tambahan.
-
-## Contoh & Playground
-
-Periksa folder `examples/` untuk demo yang dapat dijalankan:
-
-- `examples/encryption_example.php` — enkripsi per-koleksi + searchable field
-- `examples/hashed_search_example.php` — hashed searchable field example
-
-Jalankan contoh via CLI:
-
-```bash
-php examples/encryption_example.php
-php examples/hashed_search_example.php
-```
-
-## Contributing
-
-Silakan lihat `CONTRIBUTING.md` untuk panduan kontribusi.
-
-## Lisensi
-
-Lihat file `LICENSE` untuk detail lisensi.
-
-## Butuh bantuan lebih lanjut?
-
-Jika Anda mau, saya dapat menambahkan:
-
-- Mode `--dry-run` pada utilitas migrasi.
-- Dokumentasi langkah-demi-langkah di `docs/` dengan contoh migrasi dan restore index.
-- Tutorial singkat untuk mengintegrasikan PocketDB ke aplikasi kecil.
-
-Selamat mencoba PocketDB — beri tahu saya jika Anda mau saya siapkan contoh proyek kecil agar bisa langsung dijalankan.
+_Built with ❤️ using PHP and SQLite._
