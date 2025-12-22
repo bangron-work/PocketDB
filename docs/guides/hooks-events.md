@@ -1,6 +1,7 @@
 # Hooks dan Events
 
 ## Daftar Isi
+
 - [Pengenalan Hooks](#pengenalan-hooks)
 - [Daftar Hooks yang Tersedia](#daftar-hooks-yang-tersedia)
 - [Menggunakan Hooks](#menggunakan-hooks)
@@ -15,14 +16,17 @@ Hooks memungkinkan Anda untuk mengeksekusi kode pada titik-titik tertentu dalam 
 ## Daftar Hooks yang Tersedia
 
 ### Hooks untuk Operasi Insert
+
 - `beforeInsert`: Sebelum dokumen disisipkan
 - `afterInsert`: Setelah dokumen berhasil disisipkan
 
 ### Hooks untuk Operasi Update
+
 - `beforeUpdate`: Sebelum pembaruan dilakukan
 - `afterUpdate`: Setelah pembaruan berhasil
 
 ### Hooks untuk Operasi Remove
+
 - `beforeRemove`: Sebelum penghapusan dilakukan
 - `afterRemove`: Setelah penghapusan berhasil
 
@@ -30,63 +34,60 @@ Hooks memungkinkan Anda untuk mengeksekusi kode pada titik-titik tertentu dalam 
 
 ### Mendaftarkan Hook
 
+PocketDB menyediakan API sederhana untuk mendaftarkan dan menghapus hook pada koleksi.
+
+Gunakan method `on(string $event, callable $fn)` untuk mendaftarkan hook, dan
+`off(string $event, ?callable $fn = null)` untuk menghapus (tanpa parameter kedua akan
+menghapus semua listener untuk event tersebut).
+
+Contoh:
+
 ```php
 // Mendaftarkan hook sebelum insert
-$collection->addHook('beforeInsert', function($document) {
+$collection->on('beforeInsert', function(array $document) {
     // Validasi atau modifikasi dokumen
     if (empty($document['name'])) {
         throw new \Exception('Nama tidak boleh kosong');
     }
-    
-    // Menambahkan timestamp
-    $document['created_at'] = new \MongoDB\BSON\UTCDateTime();
-    
-    return $document; // Kembalikan dokumen yang sudah dimodifikasi
+
+    // Menambahkan timestamp (simpan sebagai integer UNIX time atau string ISO)
+    $document['created_at'] = time();
+
+    // Kembalikan dokumen yang sudah dimodifikasi; mengembalikan false akan
+    // membatalkan operasi insert untuk dokumen tersebut.
+    return $document;
 });
 
 // Mendaftarkan hook setelah insert
-$collection->addHook('afterInsert', function($document) {
-    // Log aktivitas
-    error_log("Dokumen baru ditambahkan: " . $document['_id']);
-    
-    // Tidak perlu mengembalikan nilai
+$collection->on('afterInsert', function(array $document, $id = null) {
+    // Log aktivitas (contoh sederhana)
+    error_log("Dokumen baru ditambahkan: " . ($id ?? $document['_id'] ?? '(unknown)'));
 });
 ```
 
 ### Menghapus Hook
 
+Untuk menghapus listener tertentu, simpan referensi callable dan berikan ke `off()`; jika
+Anda memanggil `off()` tanpa argumen kedua, semua listener pada event tersebut akan dihapus.
+
 ```php
-// Menghapus hook
-$hookId = $collection->addHook('beforeInsert', $callback);
-$collection->removeHook('beforeInsert', $hookId);
+// Menyimpan referensi callback
+$cb = function(array $doc) { /* ... */ };
+$collection->on('beforeInsert', $cb);
+
+// Menghapus callback spesifik
+$collection->off('beforeInsert', $cb);
+
+// Hapus semua listener sebelumInsert
+$collection->off('beforeInsert');
 ```
 
 ## Event System
 
-Selain hooks, PocketDB juga menyediakan event system yang lebih fleksibel untuk menangani berbagai kejadian dalam aplikasi.
-
-### Event yang Tersedia
-
-- `collection.insert` - Dipicu setelah insert berhasil
-- `collection.update` - Dipicu setelah update berhasil
-- `collection.remove` - Dipicu setelah remove berhasil
-- `database.connect` - Dipicu saat koneksi database dibuat
-- `database.error` - Dipicu saat terjadi error
-
-### Mendengarkan Event
-
-```php
-// Mendengarkan event insert
-$dispatcher = $collection->getEventDispatcher();
-
-$dispatcher->addListener('collection.insert', function($event) {
-    $document = $event->getDocument();
-    $collection = $event->getCollection();
-    
-    echo "Dokumen baru ditambahkan ke koleksi: " . $collection->getName();
-    // Lakukan sesuatu dengan $document
-});
-```
+PocketDB saat ini menyediakan sistem hook pada level `Collection` melalui `on()`/`off()`
+seperti didemonstrasikan di atas. Tidak ada event dispatcher publik yang berbeda pada versi
+ini; jika Anda memerlukan sistem event yang lebih canggih, Anda dapat mengintegrasikan
+library event dispatcher eksternal dan memanggilnya dari dalam hook `afterInsert`/`afterUpdate`.
 
 ## Contoh Penggunaan
 
@@ -94,66 +95,74 @@ $dispatcher->addListener('collection.insert', function($event) {
 
 ```php
 // Validasi sebelum menyimpan
-$users->addHook('beforeInsert', function($user) {
-    if (!filter_var($user['email'], FILTER_VALIDATE_EMAIL)) {
+$users->on('beforeInsert', function(array $user) {
+    if (!filter_var($user['email'] ?? '', FILTER_VALIDATE_EMAIL)) {
         throw new \InvalidArgumentException('Format email tidak valid');
     }
-    
-    // Enkripsi password
+
+    // Hash password jika ada
     if (isset($user['password'])) {
         $user['password'] = password_hash($user['password'], PASSWORD_DEFAULT);
     }
-    
+
     return $user;
 });
 ```
 
 ### Logging Otomatis
 
+Anda dapat menggunakan hook `afterInsert`, `afterUpdate`, dan `afterRemove` untuk membuat
+log audit pada operasi perubahan data. Contoh sederhana:
+
 ```php
 // Log semua operasi
 $auditLog = $db->selectCollection('audit_logs');
 
-$logOperation = function($event) use ($auditLog) {
+$logInsert = function(array $doc, $id = null) use ($auditLog) {
     $auditLog->insert([
-        'action' => $event->getName(),
-        'collection' => $event->getCollection()->getName(),
-        'document_id' => $event->getDocument()['_id'] ?? null,
-        'timestamp' => new \MongoDB\BSON\UTCDateTime(),
+        'action' => 'insert',
+        'collection' => $doc['_collection'] ?? null,
+        'document_id' => $id ?? $doc['_id'] ?? null,
+        'timestamp' => time(),
         'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? 'cli',
         'ip_address' => $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'
     ]);
 };
 
-// Daftarkan untuk semua event
-$dispatcher = $db->getEventDispatcher();
-$dispatcher->addListener('collection.insert', $logOperation);
-$dispatcher->addListener('collection.update', $logOperation);
-$dispatcher->addListener('collection.remove', $logOperation);
+$collection->on('afterInsert', $logInsert);
+$collection->on('afterUpdate', function($old, $new) use ($auditLog) {
+    $auditLog->insert(['action' => 'update', 'document_id' => $new['_id'] ?? null, 'timestamp' => time()]);
+});
+$collection->on('afterRemove', function($doc) use ($auditLog) {
+    $auditLog->insert(['action' => 'remove', 'document_id' => $doc['_id'] ?? null, 'timestamp' => time()]);
+});
 ```
 
 ### Soft Delete
 
+Implementasi soft delete menggunakan `beforeRemove` untuk mencegah penghapusan
+dan mengganti tindakan dengan update (mis. menambahkan `deleted_at`). Hook `beforeRemove`
+dipanggil untuk setiap dokumen yang cocok; jika hook mengembalikan `false`, operasi
+hapus pada dokumen tersebut dibatalkan.
+
 ```php
-// Implementasi soft delete
-$posts->addHook('beforeRemove', function($criteria, $options) use ($posts) {
-    // Alih-alih menghapus, update field deleted_at
-    $posts->update(
-        $criteria,
-        ['$set' => [
-            'deleted_at' => new \MongoDB\BSON\UTCDateTime(),
-            'deleted_by' => $currentUserId ?? null
-        ]],
-        $options
-    );
-    
-    // Kembalikan false untuk membatalkan operasi remove asli
+// Implementasi soft delete: mark deleted_at dan batalkan penghapusan
+$posts->on('beforeRemove', function(array $doc) use ($posts, $currentUserId) {
+    $posts->update(['_id' => $doc['_id']], ['$set' => [
+        'deleted_at' => time(),
+        'deleted_by' => $currentUserId ?? null
+    ]]);
+
+    // Kembalikan false untuk mencegah penghapusan fisik
     return false;
 });
 
-// Filter dokumen yang tidak terhapus secara default
-$posts->addHook('beforeFind', function($criteria) {
-    if (!isset($criteria['deleted_at'])) {
+// Untuk memastikan dokumen yang dihapus tidak muncul, tambahkan filter saat mencari
+$posts->on('beforeFind', function($criteria = null) {
+    if (!is_array($criteria)) {
+        $criteria = [];
+    }
+    if (!array_key_exists('deleted_at', $criteria)) {
         $criteria['deleted_at'] = ['$exists' => false];
     }
     return $criteria;
@@ -163,23 +172,28 @@ $posts->addHook('beforeFind', function($criteria) {
 ## Best Practice
 
 1. **Gunakan Hooks untuk**
+
    - Validasi data
-   - Transformasi data (seperti hashing password)
-   - Menambahkan field otomatis (timestamps, pengguna yang membuat/mengubah)
-   - Logging perubahan
+   - Transformasi data (mis. hashing password)
+   - Menambahkan field otomatis (timestamps, audit info)
+   - Logging perubahan / audit trail (via `after*` hooks)
 
 2. **Hindari**
-   - Logika bisnis yang kompleks dalam hooks
-   - Operasi I/O yang berat
-   - Memanggil operasi database lain yang bisa menyebabkan rekursi tak terbatas
+
+   - Logika bisnis yang sangat kompleks di dalam hooks
+   - Operasi I/O berat yang bisa memperlambat operasi database
+   - Memanggil operasi yang dapat men-trigger hook lain tanpa kontrol (menghindari rekursi)
 
 3. **Error Handling**
-   - Selalu tangkap exception dalam hooks
-   - Berikan pesan error yang deskriptif
-   - Gunakan custom exception untuk error bisnis
+
+   - Jika hook melempar exception, operasi akan terhenti; pastikan error ditangani dengan pesan yang jelas.
+   - Untuk validasi, lebih baik melempar `InvalidArgumentException` atau custom exception yang jelas.
 
 4. **Dokumentasi**
-   - Dokumentasikan hooks yang digunakan di kode
-   - Jelaskan tujuan dan efek samping dari setiap hook
+
+   - Dokumentasikan hook yang didaftarkan di kode, jelaskan tujuannya dan efek sampingnya.
+
+5. **Performa**
+   - Hooks dieksekusi sinkron selama operasi CRUD. Untuk tugas yang berat (mis. pengiriman email, reporting), pertimbangkan menambahkan pekerjaan ke antrian/background worker dari dalam hook `after*`.
 
 Dengan menggunakan hooks dan events dengan benar, Anda dapat membuat kode yang lebih bersih, terstruktur, dan mudah dipelihara.

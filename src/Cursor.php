@@ -33,7 +33,8 @@ class Cursor implements \IteratorAggregate
 
     public function count(): int
     {
-        $sql = 'SELECT COUNT(*) c FROM '.$this->collection->name;
+        $table = $this->collection->database->quoteIdentifier($this->collection->name);
+        $sql = 'SELECT COUNT(*) c FROM '.$table;
         $where = '';
 
         if ($this->criteriaSql) {
@@ -45,7 +46,7 @@ class Cursor implements \IteratorAggregate
         if ($this->limit || $this->skip) {
             $limit = $this->limit ? " LIMIT {$this->limit}" : ' LIMIT -1';
             $offset = $this->skip ? " OFFSET {$this->skip}" : '';
-            $sql = "SELECT COUNT(*) c FROM (SELECT 1 FROM {$this->collection->name}{$where}{$limit}{$offset})";
+            $sql = "SELECT COUNT(*) c FROM (SELECT 1 FROM {$table}{$where}{$limit}{$offset})";
         } else {
             $sql .= $where;
         }
@@ -158,7 +159,9 @@ class Cursor implements \IteratorAggregate
     {
         $this->position = 0;
 
-        $sql = ['SELECT document FROM '.$this->collection->name];
+        $table = $this->collection->database->quoteIdentifier($this->collection->name);
+
+        $sql = ['SELECT document FROM '.$table];
 
         if ($this->criteriaSql) {
             $sql[] = 'WHERE '.$this->criteriaSql;
@@ -185,7 +188,7 @@ class Cursor implements \IteratorAggregate
 
         $this->stmt = $this->collection->database->connection->query(implode(' ', $sql));
         $row = $this->stmt ? $this->stmt->fetch(\PDO::FETCH_ASSOC) : null;
-        $this->currentRow = $row ? json_decode($row['document'], true) : null;
+        $this->currentRow = $row ? $this->collection->decodeStored($row['document']) : null;
         $this->lastKey = $this->currentRow ? 0 : -1;
     }
 
@@ -207,7 +210,7 @@ class Cursor implements \IteratorAggregate
     {
         ++$this->position;
         $row = $this->stmt ? $this->stmt->fetch(\PDO::FETCH_ASSOC) : null;
-        $this->currentRow = $row ? json_decode($row['document'], true) : null;
+        $this->currentRow = $row ? $this->collection->decodeStored($row['document']) : null;
         if ($this->currentRow !== null) {
             $this->lastKey = $this->position;
         }

@@ -31,7 +31,8 @@ class Client
      */
     public function __construct(string $path, array $options = [])
     {
-        $this->path    = \rtrim($path, '\\');
+        // Trim both forward and back slashes to support cross-platform paths
+        $this->path    = \rtrim($path, '/\\');
         $this->options = $options;
     }
 

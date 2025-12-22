@@ -250,3 +250,120 @@ $fast = $users->find(['email' => 'alice@example.com'])->toArray();
   - Panduan migrasi dari MongoDB-lite ke PocketDB.
 
 Selamat mencoba PocketDB — beri tahu saya jika Anda mau saya siapkan contoh proyek kecil agar bisa langsung dijalankan.
+
+## Ringkasan penting & Referensi
+
+Berikut adalah beberapa referensi cepat dan fitur penting yang sering digunakan:
+
+- Populate (bagian aplikasi-level join):
+
+```php
+$orders = $db->selectCollection('orders');
+$ordersWithUser = $orders->find()->populate('user_id', $users)->toArray();
+```
+
+- Membuat index JSON untuk mempercepat query pada field tertentu:
+
+```php
+$db->createJsonIndex('users', 'age');
+$db->createJsonIndex('users', 'profile.level');
+```
+
+Note: index dibuat dengan `json_extract(document, '$.field')` sehingga query yang memakai field tersebut dapat menggunakan index.
+
+## Operator Query yang Didukung
+
+- Persamaan: `['name' => 'Alice']`
+- Pembanding: `['age' => ['$gt' => 20]]`, `$gte`, `$lt`, `$lte`
+- Keanggotaan: `['tag' => ['$in' => ['red', 'blue']]]` dan `$nin`
+- Eksistensi: `['field' => ['$exists' => true]]`
+
+Jika sebuah criteria tidak dapat diterjemahkan ke SQL JSON, PocketDB akan menggunakan fungsi callback PHP (`document_criteria`) untuk menilai tiap dokumen — ini fleksibel tapi lebih lambat (karena `json_decode` per baris).
+
+## Tips Performa dan Best Practices
+
+- Gunakan batch insert (`insert($batch)`) untuk throughput tinggi.
+- Buat index pada field yang sering dicari atau dipakai sebagai kondisi.
+- Hindari menyimpan field yang sangat sering diupdate hanya di dalam JSON; pertimbangkan kolom SQL terpisah (mis. `last_updated`) untuk mengurangi re-encode JSON.
+- Untuk beban penulisan paralel tinggi, pertimbangkan RDBMS server (Postgres/MySQL) karena SQLite memiliki keterbatasan pada concurrency menulis.
+
+### Optimasi Save (Upsert)
+
+Method `save()` menggunakan subquery `json_extract(...)` pada `_id` sehingga operasi upsert dapat memanfaatkan index JSON dan menghindari evaluasi PHP per-baris.
+
+Rekomendasi:
+
+```php
+$db->createJsonIndex('users', '_id');
+```
+
+## Enkripsi Per-koleksi & Field Searchable
+
+PocketDB mendukung enkripsi aplikasi-level (AES-256-CBC) pada level koleksi. Aktifkan enkripsi per-koleksi dengan `setEncryptionKey()` dan, bila diperlukan, tandai field yang harus tetap dapat dicari melalui `setSearchableFields()`.
+
+- Jika field ditandai sebagai searchable dan `hash=false`, PocketDB menyimpan nilai plain di kolom `si_{field}` sehingga `find(['field'=>value])` tetap bekerja.
+- Jika `hash=true`, PocketDB menyimpan hash SHA-256 dari nilai; pengguna dapat tetap memanggil `find()` dengan nilai plain karena library akan meng-hash kriteria sebelum dijalankan.
+
+Contoh singkat:
+
+```php
+$db = new \PocketDB\Database(':memory:');
+$col = $db->selectCollection('users');
+$col->setEncryptionKey('very-secret-key');
+$col->setSearchableFields(['email'], false);
+$col->insert(['_id'=>'u1','email'=>'alice@example.com','name'=>'Alice']);
+$found = $col->find(['email' => 'alice@example.com'])->toArray();
+```
+
+Lihat `examples/encryption_example.php`, `examples/hashed_search_example.php`, dan tests `tests/EncryptionTest.php` serta `tests/HashedSearchableFieldTest.php`.
+
+## Migrasi: Menghapus kolom `si_{field}`
+
+SQLite tidak mendukung `ALTER TABLE DROP COLUMN`. Repositori menyediakan utilitas migrasi yang melakukan rekonstruksi tabel dengan aman:
+
+`tools/migrate_drop_si.php`
+
+Usage:
+
+```bash
+php tools/migrate_drop_si.php /path/to/db.sqlite collection_name field_name
+```
+
+Lihat juga `docs/migrations/searchable_fields_migration.md` untuk panduan lengkap dan peringatan.
+
+## Benchmark & Tools
+
+- `tools/benchmark_encryption.php`: bandingkan insert/read antara koleksi terenkripsi dan plain.
+- `tools/stress_benchmark.php`: skrip benchmark tambahan.
+
+## Contoh & Playground
+
+Periksa folder `examples/` untuk demo yang dapat dijalankan:
+
+- `examples/encryption_example.php` — enkripsi per-koleksi + searchable field
+- `examples/hashed_search_example.php` — hashed searchable field example
+
+Jalankan contoh via CLI:
+
+```bash
+php examples/encryption_example.php
+php examples/hashed_search_example.php
+```
+
+## Contributing
+
+Silakan lihat `CONTRIBUTING.md` untuk panduan kontribusi.
+
+## Lisensi
+
+Lihat file `LICENSE` untuk detail lisensi.
+
+## Butuh bantuan lebih lanjut?
+
+Jika Anda mau, saya dapat menambahkan:
+
+- Mode `--dry-run` pada utilitas migrasi.
+- Dokumentasi langkah-demi-langkah di `docs/` dengan contoh migrasi dan restore index.
+- Tutorial singkat untuk mengintegrasikan PocketDB ke aplikasi kecil.
+
+Selamat mencoba PocketDB — beri tahu saya jika Anda mau saya siapkan contoh proyek kecil agar bisa langsung dijalankan.

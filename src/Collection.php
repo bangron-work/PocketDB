@@ -19,6 +19,22 @@ class Collection
     public string $name;
 
     /**
+     * Optional per-collection encryption key. If set, it takes precedence
+     * over `Database->encryptionKey` for encoding/decoding stored documents.
+     * This allows enabling encryption on a per-collection basis.
+     */
+    protected ?string $encryptionKey = null;
+
+    /**
+     * Searchable fields configuration. Map of fieldName => ['hash' => bool]
+     * When set, the collection will maintain `si_{field}` TEXT columns
+     * containing the plain or hashed value to enable searching on encrypted docs.
+     *
+     * @var array<string,array{hash:bool}>
+     */
+    protected array $searchableFields = [];
+
+    /**
      * @var string ID generation mode
      */
     protected $idMode = self::ID_MODE_AUTO;
@@ -93,6 +109,160 @@ class Collection
     }
 
     /**
+     * Set per-collection encryption key (overrides Database->encryptionKey when set).
+     */
+    public function setEncryptionKey(?string $key): self
+    {
+        $this->encryptionKey = $key;
+
+        return $this;
+    }
+
+    /**
+     * Configure searchable fields. Each field will be stored into a dedicated
+     * `si_{field}` TEXT column. If $hash is true the stored value will be
+     * a hex SHA-256 of the string (useful for privacy-preserving search).
+     */
+    public function setSearchableFields(array $fields, bool $hash = false): self
+    {
+        $this->searchableFields = [];
+        foreach ($fields as $f) {
+            $this->searchableFields[(string) $f] = ['hash' => $hash];
+        }
+
+        $this->ensureSearchableColumnsExist();
+
+        return $this;
+    }
+
+    /**
+     * Remove a searchable field configuration. If $dropColumn is true the
+     * method will attempt to remove the physical `si_{field}` column from
+     * the SQLite table by rebuilding the table without that column.
+     */
+    public function removeSearchableField(string $field, bool $dropColumn = false): self
+    {
+        if (isset($this->searchableFields[$field])) {
+            unset($this->searchableFields[$field]);
+        }
+
+        if ($dropColumn) {
+            $col = 'si_'.$field;
+            // Check if column exists
+            $stmt = $this->database->connection->query("PRAGMA table_info(`{$this->name}`)");
+            $cols = $stmt ? $stmt->fetchAll(\PDO::FETCH_ASSOC) : [];
+            $existing = [];
+            foreach ($cols as $c) {
+                $existing[$c['name']] = $c;
+            }
+
+            if (isset($existing[$col])) {
+                // SQLite has no DROP COLUMN; perform a safe table rebuild
+                $colsToKeep = [];
+                foreach ($cols as $c) {
+                    if ($c['name'] === $col) {
+                        continue;
+                    }
+                    $colsToKeep[] = $c['name'];
+                }
+
+                $colsList = implode(', ', array_map(function ($n) { return "`{$n}`"; }, $colsToKeep));
+
+                $tmp = $this->name.'_tmp_'.uniqid();
+                // Create temp table with only the kept columns
+                $createCols = [];
+                foreach ($cols as $c) {
+                    if ($c['name'] === $col) {
+                        continue;
+                    }
+                    $createCols[] = "`{$c['name']}` {$c['type']}".($c['notnull'] ? ' NOT NULL' : '');
+                }
+
+                $this->database->connection->beginTransaction();
+                try {
+                    $this->database->connection->exec("CREATE TABLE `{$tmp}` (".implode(',', $createCols).')');
+                    $this->database->connection->exec("INSERT INTO `{$tmp}` ({$colsList}) SELECT {$colsList} FROM `{$this->name}`");
+                    $this->database->connection->exec("DROP TABLE `{$this->name}`");
+                    $this->database->connection->exec("ALTER TABLE `{$tmp}` RENAME TO `{$this->name}`");
+                    $this->database->connection->commit();
+                } catch (\Throwable $e) {
+                    if ($this->database->connection->inTransaction()) {
+                        $this->database->connection->rollBack();
+                    }
+                    throw $e;
+                }
+            }
+        }
+
+        return $this;
+    }
+
+    protected function ensureSearchableColumnsExist(): void
+    {
+        if (empty($this->searchableFields)) {
+            return;
+        }
+
+        // Ensure table exists
+        $this->database->createCollection($this->name);
+
+        $stmt = $this->database->connection->query("PRAGMA table_info(`{$this->name}`)");
+        $cols = $stmt ? $stmt->fetchAll(\PDO::FETCH_ASSOC) : [];
+        $existing = [];
+        foreach ($cols as $c) {
+            $existing[$c['name']] = true;
+        }
+
+        foreach ($this->searchableFields as $field => $cfg) {
+            $col = 'si_'.$field;
+            if (!isset($existing[$col])) {
+                $this->database->connection->exec("ALTER TABLE `{$this->name}` ADD COLUMN `{$col}` TEXT NULL");
+            }
+        }
+    }
+
+    /**
+     * Compute the map of searchable column => value for a given document.
+     */
+    protected function _computeSearchIndexValues(array $doc): array
+    {
+        $out = [];
+        if (empty($this->searchableFields)) {
+            return $out;
+        }
+
+        foreach ($this->searchableFields as $field => $cfg) {
+            // support dot notation for nested fields
+            $parts = explode('.', $field);
+            $ref = $doc;
+            foreach ($parts as $p) {
+                if (!is_array($ref) || !array_key_exists($p, $ref)) {
+                    $ref = null;
+                    break;
+                }
+                $ref = $ref[$p];
+            }
+
+            if ($ref === null) {
+                $val = null;
+            } elseif (is_array($ref)) {
+                // join arrays into comma separated string
+                $val = implode(',', array_map('strval', $ref));
+            } else {
+                $val = (string) $ref;
+            }
+
+            if ($val !== null && $cfg['hash']) {
+                $val = hash('sha256', $val);
+            }
+
+            $out['si_'.$field] = $val;
+        }
+
+        return $out;
+    }
+
+    /**
      * Get current ID mode.
      */
     public function getIdMode(): string
@@ -115,7 +285,7 @@ class Collection
                 $result = $stmt->fetch(\PDO::FETCH_ASSOC);
 
                 if ($result) {
-                    $doc = \json_decode($result['document'], true);
+                    $doc = $this->decodeStored($result['document']);
                     if (isset($doc['_id']) && strpos($doc['_id'], $prefixPattern) === 0) {
                         $parts = explode('-', $doc['_id']);
                         $lastNum = (int) end($parts);
@@ -245,12 +415,15 @@ class Collection
             $doc['_id'] = $generated_id;
         }
 
-        $encoded = \json_encode($doc, JSON_UNESCAPED_UNICODE);
-        if (json_last_error() !== JSON_ERROR_NONE) {
-            throw new \RuntimeException('JSON encode error: '.json_last_error_msg());
-        }
+        $encoded = $this->encodeStored($doc);
 
         $data = ['document' => $encoded];
+
+        // Add searchable index columns when configured
+        $indexData = $this->_computeSearchIndexValues($doc);
+        foreach ($indexData as $col => $val) {
+            $data[$col] = $val;
+        }
 
         $fields = [];
         $values = [];
@@ -288,19 +461,173 @@ class Collection
     }
 
     /**
+     * Encode a document for storage. If `Database->encryptionKey` is set, the
+     * document (except `_id`) will be encrypted with AES-256-CBC and stored as
+     * an object: { _id, encrypted_data, iv }.
+     *
+     * Returns JSON string ready to be stored in `document` column.
+     */
+    protected function encodeStored(array $doc)
+    {
+        $key = $this->encryptionKey ?? $this->database->encryptionKey ?? null;
+
+        if (empty($key)) {
+            $json = \json_encode($doc, JSON_UNESCAPED_UNICODE);
+            if (json_last_error() !== JSON_ERROR_NONE) {
+                throw new \RuntimeException('JSON encode error: '.json_last_error_msg());
+            }
+
+            return $json;
+        }
+
+        $id = $doc['_id'] ?? null;
+        $payload = $doc;
+        if ($id !== null) {
+            unset($payload['_id']);
+        }
+
+        $plain = \json_encode($payload, JSON_UNESCAPED_UNICODE);
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            throw new \RuntimeException('JSON encode error: '.json_last_error_msg());
+        }
+
+        $rawKey = \hash('sha256', $key, true);
+        $ivLen = openssl_cipher_iv_length('AES-256-CBC');
+        $iv = openssl_random_pseudo_bytes($ivLen);
+        $cipher = openssl_encrypt($plain, 'AES-256-CBC', $rawKey, OPENSSL_RAW_DATA, $iv);
+
+        $store = ['_id' => $id, 'encrypted_data' => base64_encode($cipher), 'iv' => base64_encode($iv)];
+
+        $json = \json_encode($store, JSON_UNESCAPED_UNICODE);
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            throw new \RuntimeException('JSON encode error: '.json_last_error_msg());
+        }
+
+        return $json;
+    }
+
+    /**
+     * Decode a stored document string from the database into an array.
+     * If the stored value represents an encrypted payload and the database
+     * has an `encryptionKey` configured, it will attempt to decrypt and
+     * return the original document (including `_id`). Returns null on
+     * parse/decrypt failure.
+     */
+    public function decodeStored(string $stored): ?array
+    {
+        $decoded = json_decode($stored, true);
+        if ($decoded === null) {
+            return null;
+        }
+
+        // If not encrypted format, assume it's the raw document
+        if (!is_array($decoded) || !isset($decoded['encrypted_data'])) {
+            return $decoded;
+        }
+
+        $key = $this->encryptionKey ?? $this->database->encryptionKey ?? null;
+        if (empty($key)) {
+            // cannot decrypt without key
+            return null;
+        }
+
+        $rawKey = hash('sha256', $key, true);
+
+        $cipher = base64_decode($decoded['encrypted_data'] ?? '');
+        $iv = base64_decode($decoded['iv'] ?? '');
+        if ($cipher === false || $iv === false) {
+            return null;
+        }
+
+        $plain = openssl_decrypt($cipher, 'AES-256-CBC', $rawKey, OPENSSL_RAW_DATA, $iv);
+        if ($plain === false) {
+            return null;
+        }
+
+        $payload = json_decode($plain, true);
+        if (!is_array($payload)) {
+            return null;
+        }
+
+        // restore _id if present in wrapper
+        if (isset($decoded['_id'])) {
+            $payload['_id'] = $decoded['_id'];
+        }
+
+        return $payload;
+    }
+
+    /**
+     * Low-level encrypt helper that returns an array with base64-encoded
+     * `encrypted_data` and `iv`. Uses the collection key if present else
+     * falls back to Database key.
+     */
+    private function _encryptPlaintext(string $plain): array
+    {
+        $key = $this->encryptionKey ?? $this->database->encryptionKey ?? null;
+        if (empty($key)) {
+            throw new \RuntimeException('No encryption key available');
+        }
+
+        $rawKey = hash('sha256', $key, true);
+        $ivLen = openssl_cipher_iv_length('AES-256-CBC');
+        $iv = openssl_random_pseudo_bytes($ivLen);
+        $cipher = openssl_encrypt($plain, 'AES-256-CBC', $rawKey, OPENSSL_RAW_DATA, $iv);
+
+        return ['encrypted_data' => base64_encode($cipher), 'iv' => base64_encode($iv)];
+    }
+
+    /**
+     * Low-level decrypt helper that accepts encrypted_data and iv (base64)
+     * and returns the decrypted plaintext or null on failure.
+     */
+    private function _decryptToPlaintext(string $encryptedBase64, string $ivBase64): ?string
+    {
+        $key = $this->encryptionKey ?? $this->database->encryptionKey ?? null;
+        if (empty($key)) {
+            return null;
+        }
+
+        $rawKey = hash('sha256', $key, true);
+        $cipher = base64_decode($encryptedBase64);
+        $iv = base64_decode($ivBase64);
+        if ($cipher === false || $iv === false) {
+            return null;
+        }
+
+        $plain = openssl_decrypt($cipher, 'AES-256-CBC', $rawKey, OPENSSL_RAW_DATA, $iv);
+
+        return $plain === false ? null : $plain;
+    }
+
+    /**
      * Save document.
      */
     public function save(array $document, bool $create = false): mixed
     {
         // Use a single upsert-style SQL statement to avoid race conditions
         if (isset($document['_id'])) {
-            $json = json_encode($document, JSON_UNESCAPED_UNICODE);
+            $json = $this->encodeStored($document);
             if (json_last_error() !== JSON_ERROR_NONE) {
                 throw new \RuntimeException('JSON encode error: '.json_last_error_msg());
             }
 
+            // prepare searchable columns
+            $indexData = $this->_computeSearchIndexValues($document);
+            $indexCols = [];
+            $indexVals = [];
+            $updateAssignments = [];
+            foreach ($indexData as $col => $val) {
+                $indexCols[] = "`{$col}`";
+                $indexVals[] = is_null($val) ? 'NULL' : $this->database->connection->quote($val);
+                $updateAssignments[] = "{$col}=".(is_null($val) ? 'NULL' : $this->database->connection->quote($val));
+            }
+
+            $indexColsStr = $indexCols ? ', '.implode(',', $indexCols) : '';
+            $indexValsStr = $indexVals ? ', '.implode(',', $indexVals) : '';
+            $updateAssignStr = $updateAssignments ? ', '.implode(',', $updateAssignments) : '';
+
             // OPTIMIZATION: use json_extract on the _id field so SQLite can use indexes
-            // and avoid invoking the PHP callback `document_criteria` for every row.
             $idVal = $document['_id'];
             if (is_int($idVal) || is_float($idVal) || (is_string($idVal) && is_numeric($idVal))) {
                 $quotedId = $idVal;
@@ -310,8 +637,8 @@ class Collection
 
             $subQuery = "SELECT id FROM {$this->name} WHERE json_extract(document, '$._id') = {$quotedId} LIMIT 1";
 
-            $sql = "INSERT INTO {$this->name} (id, document) VALUES (({$subQuery}), ".$this->database->connection->quote($json).') '
-                .'ON CONFLICT(id) DO UPDATE SET document='.$this->database->connection->quote($json);
+            $sql = "INSERT INTO {$this->name} (id, document{$indexColsStr}) VALUES (({$subQuery}), ".$this->database->connection->quote($json)."{$indexValsStr}) "
+                .'ON CONFLICT(id) DO UPDATE SET document='.$this->database->connection->quote($json).$updateAssignStr;
 
             $res = $this->database->connection->exec($sql);
 
@@ -365,7 +692,7 @@ class Collection
         $result = $stmt ? $stmt->fetchAll(\PDO::FETCH_ASSOC) : [];
 
         foreach ($result as $doc) {
-            $_doc = \json_decode($doc['document'], true);
+            $_doc = $this->decodeStored($doc['document']);
 
             // Handle null case for $_doc
             if ($_doc === null) {
@@ -383,13 +710,21 @@ class Collection
                 }
             }
 
-            $encoded = json_encode($document, JSON_UNESCAPED_UNICODE);
+            $encoded = $this->encodeStored($document);
             if (json_last_error() !== JSON_ERROR_NONE) {
                 // skip this document update if encoding fails
                 continue;
             }
 
-            $sql = 'UPDATE '.$this->name.' SET document='.$this->database->connection->quote($encoded).' WHERE id='.$doc['id'];
+            // include searchable columns when present
+            $indexData = $this->_computeSearchIndexValues($document);
+            $assign = [];
+            $assign[] = 'document='.$this->database->connection->quote($encoded);
+            foreach ($indexData as $col => $val) {
+                $assign[] = $col.'='.(is_null($val) ? 'NULL' : $this->database->connection->quote($val));
+            }
+
+            $sql = 'UPDATE '.$this->name.' SET '.implode(',', $assign).' WHERE id='.$doc['id'];
 
             $this->database->connection->exec($sql);
 
@@ -434,7 +769,7 @@ class Collection
         $deleted = 0;
 
         foreach ($result as $row) {
-            $doc = \json_decode($row['document'], true) ?: [];
+            $doc = $this->decodeStored($row['document']) ?: [];
 
             // Before remove hooks can veto by returning false
             $skip = false;
@@ -570,7 +905,38 @@ class Collection
         $parts = [];
         foreach ($criteria as $key => $value) {
             $path = '$.'.str_replace("'", "\\'", $key);
-            $expr = "json_extract(document, '".$path."')";
+
+            // If this key is configured as searchable, use the si_{key} column
+            if (isset($this->searchableFields[$key])) {
+                $expr = "si_{$key}";
+                // If the searchable field is configured with hashing, pre-hash
+                // the comparison value so callers may still pass the plain value.
+                if (is_array($value)) {
+                    // operator-style value -- hash individual operands where appropriate
+                    $cfg = $this->searchableFields[$key];
+                    if (!empty($cfg['hash'])) {
+                        $new = [];
+                        foreach ($value as $op => $v) {
+                            if (in_array($op, ['$in', '$nin'], true) && is_array($v)) {
+                                $hvals = [];
+                                foreach ($v as $vv) {
+                                    $hvals[] = hash('sha256', (string) $vv);
+                                }
+                                $new[$op] = $hvals;
+                            } else {
+                                $new[$op] = is_array($v) ? $v : hash('sha256', (string) $v);
+                            }
+                        }
+                        $value = $new;
+                    }
+                } else {
+                    if (!empty($this->searchableFields[$key]['hash'])) {
+                        $value = hash('sha256', (string) $value);
+                    }
+                }
+            } else {
+                $expr = "json_extract(document, '".$path."')";
+            }
 
             if (is_array($value)) {
                 // support basic operators: $gt, $gte, $lt, $lte, $in, $nin, $exists

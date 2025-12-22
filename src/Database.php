@@ -16,6 +16,18 @@ class Database
     public $connection;
 
     /**
+     * Raw options passed to constructor (PDO options + custom options)
+     *
+     * @var array
+     */
+    protected array $options = [];
+
+    /**
+     * Optional encryption key (application-level AES-256) if provided in options
+     */
+    public ?string $encryptionKey = null;
+
+    /**
      * @var array<string,\PocketDB\Collection>
      */
     protected array $collections = [];
@@ -52,6 +64,9 @@ class Database
     {
         $dns = "sqlite:{$path}";
         $this->path = $path;
+        $this->options = $options;
+        $this->encryptionKey = $options['encryption_key'] ?? null;
+
         $this->connection = new \PDO($dns, null, null, $options);
 
         $database = $this;
@@ -225,6 +240,13 @@ class Database
         if (\is_callable($criteria)) {
             $this->document_criterias[$id] = $criteria;
 
+            // make callable criteria discoverable by SQLite static callback
+            if (class_exists('WeakReference')) {
+                self::$criteria_registry[$id] = \WeakReference::create($this);
+            } else {
+                self::$criteria_registry[$id] = $this;
+            }
+
             return $id;
         }
 
@@ -323,6 +345,10 @@ class Database
      */
     public function createCollection(string $name): void
     {
+        if (!preg_match('/^[A-Za-z0-9_]+$/', $name)) {
+            throw new \InvalidArgumentException('Invalid collection name: '.$name);
+        }
+
         $this->connection->exec("CREATE TABLE IF NOT EXISTS `{$name}` ( id INTEGER PRIMARY KEY AUTOINCREMENT, document TEXT )");
     }
 
@@ -331,6 +357,10 @@ class Database
      */
     public function dropCollection(string $name): void
     {
+        if (!preg_match('/^[A-Za-z0-9_]+$/', $name)) {
+            throw new \InvalidArgumentException('Invalid collection name: '.$name);
+        }
+
         $this->connection->exec("DROP TABLE IF EXISTS `{$name}`");
 
         // Remove collection from cache
@@ -395,10 +425,27 @@ class Database
      */
     public function createJsonIndex(string $collection, string $field, ?string $indexName = null): void
     {
+        if (!preg_match('/^[A-Za-z0-9_]+$/', $collection)) {
+            throw new \InvalidArgumentException('Invalid collection name: '.$collection);
+        }
+
         $name = $indexName ?? sprintf('idx_%s_%s', $collection, preg_replace('/[^a-zA-Z0-9_]/', '_', $field));
         $path = '$.'.str_replace("'", "\\'", $field);
         $sql = 'CREATE INDEX IF NOT EXISTS '.$name.' ON '.$collection." (json_extract(document, '".$path."'))";
         $this->connection->exec($sql);
+    }
+
+    /**
+     * Quote an identifier (table/index/column name) in a safe manner.
+     * Throws InvalidArgumentException for invalid identifiers.
+     */
+    public function quoteIdentifier(string $name): string
+    {
+        if (!preg_match('/^[A-Za-z0-9_]+$/', $name)) {
+            throw new \InvalidArgumentException('Invalid identifier: '.$name);
+        }
+
+        return '`'.str_replace('`', '``', $name).'`';
     }
 
     /**
