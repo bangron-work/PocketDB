@@ -1,0 +1,38 @@
+/ .idea
+/.vscode
+/.env
+/.env.local
+/vendor/
+/tests/test_databases/*.sqlite
+/tests/test_databases/*.sqlite-wal
+/tests/test_databases/*.sqlite-shm
+*.log
+phpunit_run.log
+phpunit_out.txt
+/.DS_Store
+/.phpunit.result.cache
+/.cache
+
+# Documentation/site build
+docs/_site/
+site/
+
+# Build artifacts
+build/
+dist/
+
+# Coverage
+coverage/
+
+# Composer lock (commit this file for reproducible installs)
+# composer.lock
+# OS generated files #
+######################
+._*
+.Apple*
+.DS_Store
+ehthumbs.db
+Icon?
+Thumbs.db
+/nbproject
+/vendor

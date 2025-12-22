@@ -1,0 +1,19 @@
+{
+    "name": "pocketdb/flight-api-example",
+    "description": "Contoh integrasi PocketDB dengan Flight PHP",
+    "type": "project",
+    "require": {
+        "php": ">=8.0",
+        "mikecao/flight": "^2.0",
+        "bangron-work/pocketdb": "@dev"
+    },
+    "autoload": {
+        "psr-4": {
+            "App\\": "src/"
+        }
+    },
+    "config": {
+        "optimize-autoloader": true,
+        "preferred-install": "dist",
+        "sort-packages": true
+    }
