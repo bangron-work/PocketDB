@@ -3,70 +3,106 @@
 namespace PocketDB;
 
 /**
- * Client object.
+ * Client object for managing PocketDB databases.
  */
 class Client
 {
-
     /**
      * @var array<string,\PocketDB\Database>
      */
     protected array $databases = [];
 
     /**
-     * @var string
+     * @var string Database path
      */
     public string $path;
 
     /**
-     * @var array
+     * @var array Client options
      */
     protected array $options = [];
 
     /**
-     * Constructor
+     * Path validation regex for database names.
+     */
+    private const DATABASE_NAME_REGEX = '/^[a-z0-9_-]+$/i';
+
+    /**
+     * Constructor.
      *
-     * @param string $path - Pathname to database file or :memory:
-     * @param array  $options
+     * @param string $path    Pathname to database file or :memory:
+     * @param array  $options Client options
      */
     public function __construct(string $path, array $options = [])
     {
-        // Trim both forward and back slashes to support cross-platform paths
-        $this->path    = \rtrim($path, '/\\');
+        $this->path = $this->normalizePath($path);
         $this->options = $options;
     }
 
     /**
-     * List Databases
+     * Normalize path by trimming slashes.
+     */
+    private function normalizePath(string $path): string
+    {
+        return \rtrim($path, '/\\');
+    }
+
+    /**
+     * List Databases.
      *
      * @return array List of database names
      */
     public function listDBs(): array
     {
-
-        // Return all databases available in memory
         if ($this->path === Database::DSN_PATH_MEMORY) {
-            return array_keys($this->databases);
+            return $this->getMemoryDatabaseNames();
         }
 
-        // Return all databases available on disk
+        return $this->getDiskDatabaseNames();
+    }
+
+    /**
+     * Get database names from memory.
+     */
+    private function getMemoryDatabaseNames(): array
+    {
+        return array_keys($this->databases);
+    }
+
+    /**
+     * Get database names from disk.
+     */
+    private function getDiskDatabaseNames(): array
+    {
         $databases = [];
 
-        foreach (new \DirectoryIterator($this->path) as $fileInfo) {
-            if ($fileInfo->getExtension() === 'sqlite') {
-                $databases[] = $fileInfo->getBasename('.sqlite');
+        try {
+            foreach (new \DirectoryIterator($this->path) as $fileInfo) {
+                if ($this->isSqliteFile($fileInfo)) {
+                    $databases[] = $fileInfo->getBasename('.sqlite');
+                }
             }
+        } catch (\Exception $e) {
+            // Handle directory access errors gracefully
+            return [];
         }
 
         return $databases;
     }
 
     /**
-     * Select Collection
+     * Check if file is SQLite database.
+     */
+    private function isSqliteFile(\SplFileInfo $fileInfo): bool
+    {
+        return $fileInfo->getExtension() === 'sqlite';
+    }
+
+    /**
+     * Select Collection.
      *
-     * @param  string $database
-     * @param  string $collection
-     * @return Collection
+     * @param string $database   Database name
+     * @param string $collection Collection name
      */
     public function selectCollection(string $database, string $collection): Collection
     {
@@ -74,52 +110,82 @@ class Client
     }
 
     /**
-     * Select database
+     * Select database.
      *
-     * @param  string $name
-     * @return Database
+     * @param string $name Database name
      */
     public function selectDB(string $name): Database
     {
-
-        // Validate database name to avoid path traversal or invalid names
-        if ($name !== Database::DSN_PATH_MEMORY && !preg_match('/^[a-z0-9_-]+$/i', $name)) {
-            throw new \InvalidArgumentException('Invalid database name');
-        }
+        $this->validateDatabaseName($name);
 
         if (!isset($this->databases[$name])) {
-            $this->databases[$name] = new Database(
-                $this->path === Database::DSN_PATH_MEMORY ? $this->path : sprintf('%s/%s.sqlite', $this->path, $name),
-                $this->options
-            );
-            // attach back-reference to client
-            if (is_object($this->databases[$name])) {
-                $this->databases[$name]->client = $this;
-            }
+            $this->databases[$name] = $this->createDatabaseInstance($name);
         }
 
         return $this->databases[$name];
     }
 
     /**
+     * Validate database name.
+     */
+    private function validateDatabaseName(string $name): void
+    {
+        if ($name !== Database::DSN_PATH_MEMORY && !preg_match(self::DATABASE_NAME_REGEX, $name)) {
+            throw new \InvalidArgumentException('Invalid database name');
+        }
+    }
+
+    /**
+     * Create database instance.
+     */
+    private function createDatabaseInstance(string $name): Database
+    {
+        $dbPath = $this->buildDatabasePath($name);
+        $database = new Database($dbPath, $this->options);
+
+        // Attach back-reference to client
+        $database->client = $this;
+
+        return $database;
+    }
+
+    /**
+     * Build database file path.
+     */
+    private function buildDatabasePath(string $name): string
+    {
+        if ($this->path === Database::DSN_PATH_MEMORY) {
+            return $this->path;
+        }
+
+        return sprintf('%s/%s.sqlite', $this->path, $name);
+    }
+
+    /**
      * Helper to fetch nested values using dot notation from arrays.
      */
-    private function getValueByDot(array $data, string $path)
+    private function getValueByDot(array $data, string $path): ?string
     {
         foreach (explode('.', $path) as $key) {
-            if (!is_array($data) || !array_key_exists($key, $data)) return null;
+            if (!is_array($data) || !array_key_exists($key, $data)) {
+                return null;
+            }
             $data = $data[$key];
         }
+
         return $data;
     }
 
+    /**
+     * Magic getter for database access.
+     */
     public function __get(string $database): Database
     {
         return $this->selectDB($database);
     }
 
     /**
-     * Close all database connections held by this client
+     * Close all database connections held by this client.
      */
     public function close(): void
     {
@@ -132,6 +198,9 @@ class Client
         $this->databases = [];
     }
 
+    /**
+     * Destructor to ensure all connections are closed.
+     */
     public function __destruct()
     {
         $this->close();

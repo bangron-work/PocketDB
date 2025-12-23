@@ -17,10 +17,26 @@ Sangat cocok untuk aplikasi yang membutuhkan API bergaya MongoDB tanpa perlu rep
 
 ## 📦 Instalasi
 
+### Menggunakan Composer (Direkomendasikan)
+
 ```bash
 composer require bangron-work/pocketdb
-
 ```
+
+### Menggunakan GitHub
+
+```bash
+# Clone repository
+git clone https://github.com/bangron-work/PocketDB.git
+cd PocketDB
+
+# Include dalam project PHP Anda
+require_once 'src/Client.php';
+```
+
+**GitHub Repository:** https://github.com/bangron-work/PocketDB
+
+**Dokumentasi Lengkap:** [Dokumentasi Lengkap](docs/index.md)
 
 ## ⚡ Memulai Cepat
 

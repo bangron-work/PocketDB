@@ -14,6 +14,32 @@ class Collection
     public const ID_MODE_MANUAL = 'manual';      // Use provided _id only
     public const ID_MODE_PREFIX = 'prefix';      // Generate with prefix
 
+    /**
+     * Hook Event Constants.
+     */
+    public const HOOK_BEFORE_INSERT = 'beforeInsert';
+    public const HOOK_AFTER_INSERT = 'afterInsert';
+    public const HOOK_BEFORE_UPDATE = 'beforeUpdate';
+    public const HOOK_AFTER_UPDATE = 'afterUpdate';
+    public const HOOK_BEFORE_REMOVE = 'beforeRemove';
+    public const HOOK_AFTER_REMOVE = 'afterRemove';
+
+    /**
+     * JSON Query Operator Constants.
+     */
+    private const JSON_OP_GT = '$gt';
+    private const JSON_OP_GTE = '$gte';
+    private const JSON_OP_LT = '$lt';
+    private const JSON_OP_LTE = '$lte';
+    private const JSON_OP_IN = '$in';
+    private const JSON_OP_NIN = '$nin';
+    private const JSON_OP_EXISTS = '$exists';
+
+    /**
+     * Searchable Field Prefix.
+     */
+    private const SEARCHABLE_PREFIX = 'si_';
+
     public Database $database;
 
     public string $name;
@@ -147,7 +173,7 @@ class Collection
         }
 
         if ($dropColumn) {
-            $col = 'si_'.$field;
+            $col = self::SEARCHABLE_PREFIX.$field;
             // Check if column exists
             $stmt = $this->database->connection->query("PRAGMA table_info(`{$this->name}`)");
             $cols = $stmt ? $stmt->fetchAll(\PDO::FETCH_ASSOC) : [];
@@ -214,7 +240,7 @@ class Collection
         }
 
         foreach ($this->searchableFields as $field => $cfg) {
-            $col = 'si_'.$field;
+            $col = self::SEARCHABLE_PREFIX.$field;
             if (!isset($existing[$col])) {
                 $this->database->connection->exec("ALTER TABLE `{$this->name}` ADD COLUMN `{$col}` TEXT NULL");
             }
@@ -256,7 +282,7 @@ class Collection
                 $val = hash('sha256', $val);
             }
 
-            $out['si_'.$field] = $val;
+            $out[self::SEARCHABLE_PREFIX.$field] = $val;
         }
 
         return $out;
@@ -383,48 +409,99 @@ class Collection
      */
     protected function _insert(array $document): mixed
     {
-        $table = $this->name;
         $doc = $document;
 
-        // Allow beforeInsert hooks to modify the document. Hooks should return
-        // the modified document (or null to keep original).
-        if (!empty($this->hooks['beforeInsert'])) {
-            foreach ($this->hooks['beforeInsert'] as $h) {
-                $ret = $h($doc);
+        // Apply before insert hooks
+        $doc = $this->applyHooks('beforeInsert', $doc);
+        if ($doc === false) {
+            return false;
+        }
 
-                // Jika hook mengembalikan false secara eksplisit, batalkan proses!
-                if ($ret === false) {
+        // Handle _id generation
+        $doc = $this->ensureDocumentId($doc);
+        if ($doc === false) {
+            return false;
+        }
+
+        // Encode and prepare data for storage
+        $data = $this->prepareDocumentForStorage($doc);
+
+        // Execute insert
+        $insertId = $this->executeInsert($data);
+
+        if ($insertId) {
+            // Trigger after insert hooks
+            $this->applyHooks('afterInsert', $doc, $insertId);
+
+            return $insertId;
+        }
+
+        return false;
+    }
+
+    /**
+     * Apply hooks for a specific event.
+     */
+    protected function applyHooks(string $event, $data, $id = null): mixed
+    {
+        if (!empty($this->hooks[$event])) {
+            foreach ($this->hooks[$event] as $hook) {
+                $result = $hook($data, $id);
+
+                if ($result === false) {
                     return false;
                 }
 
-                // Jika hook mengembalikan array, gunakan array tersebut (update data)
-                if (is_array($ret)) {
-                    $doc = $ret;
+                if (is_array($result)) {
+                    $data = $result;
                 }
             }
         }
 
-        // Handle _id based on mode
-        if (!isset($doc['_id'])) {
-            $generated_id = $this->_generateId();
+        return $data;
+    }
 
-            if ($this->idMode === self::ID_MODE_MANUAL && $generated_id === null) {
+    /**
+     * Ensure document has proper _id based on current mode.
+     */
+    protected function ensureDocumentId(array $document): mixed
+    {
+        if (!isset($document['_id'])) {
+            $generatedId = $this->_generateId();
+
+            if ($this->idMode === self::ID_MODE_MANUAL && $generatedId === null) {
                 return false;
             }
 
-            $doc['_id'] = $generated_id;
+            $document['_id'] = $generatedId;
         }
 
-        $encoded = $this->encodeStored($doc);
+        return $document;
+    }
 
+    /**
+     * Prepare document data for storage (encoding + searchable fields).
+     */
+    protected function prepareDocumentForStorage(array $document): array
+    {
+        $encoded = $this->encodeStored($document);
         $data = ['document' => $encoded];
 
         // Add searchable index columns when configured
-        $indexData = $this->_computeSearchIndexValues($doc);
+        $indexData = $this->_computeSearchIndexValues($document);
         foreach ($indexData as $col => $val) {
             $data[$col] = $val;
         }
 
+        return $data;
+    }
+
+    /**
+     * Execute the actual SQL insert statement.
+     */
+    protected function executeInsert(array $data): mixed
+    {
+        $table = $this->name;
         $fields = [];
         $values = [];
 
@@ -437,27 +514,22 @@ class Collection
         $values = \implode(',', $values);
 
         $sql = "INSERT INTO {$table} ({$fields}) VALUES ({$values})";
-        $res = $this->database->connection->exec($sql);
 
-        if ($res) {
-            // trigger afterInsert hooks
-            if (!empty($this->hooks['afterInsert'])) {
-                foreach ($this->hooks['afterInsert'] as $h) {
-                    try {
-                        $h($doc, $doc['_id']);
-                    } catch (\Throwable $e) { /* ignore hook errors */
-                    }
-                }
-            }
-            // flush collection cache on write
-            $this->flushCache();
-
-            return $doc['_id'];
-        } else {
-            trigger_error('SQL Error: '.\implode(', ', $this->database->connection->errorInfo()).":\n".$sql);
-
-            return false;
+        if ($this->database->connection->exec($sql)) {
+            return $data['document'] ? json_decode($data['document'], true)['_id'] : null;
         }
+
+        $this->logSqlError($sql);
+
+        return false;
+    }
+
+    /**
+     * Log SQL error for debugging.
+     */
+    protected function logSqlError(string $sql): void
+    {
+        trigger_error('SQL Error: '.\implode(', ', $this->database->connection->errorInfo()).":\n".$sql);
     }
 
     /**
@@ -472,38 +544,62 @@ class Collection
         $key = $this->encryptionKey ?? $this->database->encryptionKey ?? null;
 
         if (empty($key)) {
-            $json = \json_encode($doc, JSON_UNESCAPED_UNICODE);
-            if (json_last_error() !== JSON_ERROR_NONE) {
-                throw new \RuntimeException('JSON encode error: '.json_last_error_msg());
-            }
-
-            return $json;
+            return $this->encodeJson($doc);
         }
 
+        return $this->encodeEncrypted($doc, $key);
+    }
+
+    /**
+     * Encode document as JSON (no encryption).
+     */
+    private function encodeJson(array $doc): string
+    {
+        $json = \json_encode($doc, JSON_UNESCAPED_UNICODE);
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            throw new \RuntimeException('JSON encode error: '.json_last_error_msg());
+        }
+
+        return $json;
+    }
+
+    /**
+     * Encode document with AES-256-CBC encryption.
+     */
+    private function encodeEncrypted(array $doc, string $key): string
+    {
         $id = $doc['_id'] ?? null;
         $payload = $doc;
         if ($id !== null) {
             unset($payload['_id']);
         }
 
-        $plain = \json_encode($payload, JSON_UNESCAPED_UNICODE);
-        if (json_last_error() !== JSON_ERROR_NONE) {
-            throw new \RuntimeException('JSON encode error: '.json_last_error_msg());
-        }
+        $plain = $this->encodeJson($payload);
+        $encryptionData = $this->encryptData($plain, $key);
 
+        $store = [
+            '_id' => $id,
+            'encrypted_data' => $encryptionData['encrypted_data'],
+            'iv' => $encryptionData['iv'],
+        ];
+
+        return $this->encodeJson($store);
+    }
+
+    /**
+     * Encrypt data using AES-256-CBC.
+     */
+    private function encryptData(string $plain, string $key): array
+    {
         $rawKey = \hash('sha256', $key, true);
         $ivLen = openssl_cipher_iv_length('AES-256-CBC');
         $iv = openssl_random_pseudo_bytes($ivLen);
         $cipher = openssl_encrypt($plain, 'AES-256-CBC', $rawKey, OPENSSL_RAW_DATA, $iv);
 
-        $store = ['_id' => $id, 'encrypted_data' => base64_encode($cipher), 'iv' => base64_encode($iv)];
-
-        $json = \json_encode($store, JSON_UNESCAPED_UNICODE);
-        if (json_last_error() !== JSON_ERROR_NONE) {
-            throw new \RuntimeException('JSON encode error: '.json_last_error_msg());
-        }
-
-        return $json;
+        return [
+            'encrypted_data' => base64_encode($cipher),
+            'iv' => base64_encode($iv),
+        ];
     }
 
     /**
@@ -521,17 +617,56 @@ class Collection
         }
 
         // If not encrypted format, assume it's the raw document
-        if (!is_array($decoded) || !isset($decoded['encrypted_data'])) {
+        if (!$this->isEncryptedFormat($decoded)) {
             return $decoded;
         }
 
+        return $this->decryptDocument($decoded);
+    }
+
+    /**
+     * Check if decoded data represents an encrypted document.
+     */
+    private function isEncryptedFormat(array $decoded): bool
+    {
+        return is_array($decoded) && isset($decoded['encrypted_data']);
+    }
+
+    /**
+     * Decrypt an encrypted document.
+     */
+    private function decryptDocument(array $decoded): ?array
+    {
         $key = $this->encryptionKey ?? $this->database->encryptionKey ?? null;
         if (empty($key)) {
-            // cannot decrypt without key
+            // Cannot decrypt without key
             return null;
         }
 
-        $rawKey = hash('sha256', $key, true);
+        $decryptionResult = $this->decryptData($decoded);
+        if ($decryptionResult === null) {
+            return null;
+        }
+
+        $payload = json_decode($decryptionResult, true);
+        if (!is_array($payload)) {
+            return null;
+        }
+
+        // Restore _id if present in wrapper
+        if (isset($decoded['_id'])) {
+            $payload['_id'] = $decoded['_id'];
+        }
+
+        return $payload;
+    }
+
+    /**
+     * Decrypt encrypted data using the provided key.
+     */
+    private function decryptData(array $decoded): ?string
+    {
+        $rawKey = hash('sha256', $this->encryptionKey ?? $this->database->encryptionKey ?? '', true);
 
         $cipher = base64_decode($decoded['encrypted_data'] ?? '');
         $iv = base64_decode($decoded['iv'] ?? '');
@@ -539,22 +674,7 @@ class Collection
             return null;
         }
 
-        $plain = openssl_decrypt($cipher, 'AES-256-CBC', $rawKey, OPENSSL_RAW_DATA, $iv);
-        if ($plain === false) {
-            return null;
-        }
-
-        $payload = json_decode($plain, true);
-        if (!is_array($payload)) {
-            return null;
-        }
-
-        // restore _id if present in wrapper
-        if (isset($decoded['_id'])) {
-            $payload['_id'] = $decoded['_id'];
-        }
-
-        return $payload;
+        return openssl_decrypt($cipher, 'AES-256-CBC', $rawKey, OPENSSL_RAW_DATA, $iv);
     }
 
     /**
@@ -569,12 +689,7 @@ class Collection
             throw new \RuntimeException('No encryption key available');
         }
 
-        $rawKey = hash('sha256', $key, true);
-        $ivLen = openssl_cipher_iv_length('AES-256-CBC');
-        $iv = openssl_random_pseudo_bytes($ivLen);
-        $cipher = openssl_encrypt($plain, 'AES-256-CBC', $rawKey, OPENSSL_RAW_DATA, $iv);
-
-        return ['encrypted_data' => base64_encode($cipher), 'iv' => base64_encode($iv)];
+        return $this->encryptData($plain, $key);
     }
 
     /**
@@ -588,6 +703,14 @@ class Collection
             return null;
         }
 
+        return $this->decryptDataString($encryptedBase64, $ivBase64, $key);
+    }
+
+    /**
+     * Decrypt data using encrypted string and IV.
+     */
+    private function decryptDataString(string $encryptedBase64, string $ivBase64, string $key): ?string
+    {
         $rawKey = hash('sha256', $key, true);
         $cipher = base64_decode($encryptedBase64);
         $iv = base64_decode($ivBase64);
@@ -605,53 +728,87 @@ class Collection
      */
     public function save(array $document, bool $create = false): mixed
     {
-        // Use a single upsert-style SQL statement to avoid race conditions
+        // Use upsert for existing documents, insert for new ones
         if (isset($document['_id'])) {
-            $json = $this->encodeStored($document);
-            if (json_last_error() !== JSON_ERROR_NONE) {
-                throw new \RuntimeException('JSON encode error: '.json_last_error_msg());
-            }
-
-            // prepare searchable columns
-            $indexData = $this->_computeSearchIndexValues($document);
-            $indexCols = [];
-            $indexVals = [];
-            $updateAssignments = [];
-            foreach ($indexData as $col => $val) {
-                $indexCols[] = "`{$col}`";
-                $indexVals[] = is_null($val) ? 'NULL' : $this->database->connection->quote($val);
-                $updateAssignments[] = "{$col}=".(is_null($val) ? 'NULL' : $this->database->connection->quote($val));
-            }
-
-            $indexColsStr = $indexCols ? ', '.implode(',', $indexCols) : '';
-            $indexValsStr = $indexVals ? ', '.implode(',', $indexVals) : '';
-            $updateAssignStr = $updateAssignments ? ', '.implode(',', $updateAssignments) : '';
-
-            // OPTIMIZATION: use json_extract on the _id field so SQLite can use indexes
-            $idVal = $document['_id'];
-            if (is_int($idVal) || is_float($idVal) || (is_string($idVal) && is_numeric($idVal))) {
-                $quotedId = $idVal;
-            } else {
-                $quotedId = $this->database->connection->quote((string) $idVal);
-            }
-
-            $subQuery = "SELECT id FROM {$this->name} WHERE json_extract(document, '$._id') = {$quotedId} LIMIT 1";
-
-            $sql = "INSERT INTO {$this->name} (id, document{$indexColsStr}) VALUES (({$subQuery}), ".$this->database->connection->quote($json)."{$indexValsStr}) "
-                .'ON CONFLICT(id) DO UPDATE SET document='.$this->database->connection->quote($json).$updateAssignStr;
-
-            $res = $this->database->connection->exec($sql);
-
-            if ($res === false) {
-                trigger_error('SQL Error: '.implode(', ', $this->database->connection->errorInfo())."\n".$sql);
-
-                return false;
-            }
-
-            return $document['_id'];
+            return $this->upsertDocument($document);
         }
 
         return $this->insert($document);
+    }
+
+    /**
+     * Perform an upsert operation (update if exists, insert if not).
+     */
+    protected function upsertDocument(array $document): mixed
+    {
+        $json = $this->encodeStored($document);
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            throw new \RuntimeException('JSON encode error: '.json_last_error_msg());
+        }
+
+        // Prepare searchable columns for the upsert operation
+        $indexData = $this->_computeSearchIndexValues($document);
+        $upsertData = $this->prepareUpsertData($json, $indexData);
+
+        // Build the upsert SQL statement
+        $sql = $this->buildUpsertSql($document['_id'], $json, $upsertData);
+
+        $res = $this->database->connection->exec($sql);
+
+        if ($res === false) {
+            $this->logSqlError($sql);
+
+            return false;
+        }
+
+        return $document['_id'];
+    }
+
+    /**
+     * Prepare data for upsert operation.
+     */
+    protected function prepareUpsertData(string $json, array $indexData): array
+    {
+        $indexCols = [];
+        $indexVals = [];
+        $updateAssignments = [];
+
+        foreach ($indexData as $col => $val) {
+            $indexCols[] = "`{$col}`";
+            $indexVals[] = is_null($val) ? 'NULL' : $this->database->connection->quote($val);
+            $updateAssignments[] = "{$col}=".(is_null($val) ? 'NULL' : $this->database->connection->quote($val));
+        }
+
+        return [
+            'cols' => $indexCols ? ', '.implode(',', $indexCols) : '',
+            'vals' => $indexVals ? ', '.implode(',', $indexVals) : '',
+            'assignments' => $updateAssignments ? ', '.implode(',', $updateAssignments) : '',
+        ];
+    }
+
+    /**
+     * Build the upsert SQL statement.
+     */
+    protected function buildUpsertSql($idVal, string $json, array $upsertData): string
+    {
+        // Optimization: use json_extract on the _id field so SQLite can use indexes
+        $quotedId = $this->quoteIdValue($idVal);
+        $subQuery = "SELECT id FROM {$this->name} WHERE json_extract(document, '$._id') = {$quotedId} LIMIT 1";
+
+        return "INSERT INTO {$this->name} (id, document{$upsertData['cols']}) VALUES (({$subQuery}), ".$this->database->connection->quote($json)."{$upsertData['vals']}) "
+            .'ON CONFLICT(id) DO UPDATE SET document='.$this->database->connection->quote($json).$upsertData['assignments'];
+    }
+
+    /**
+     * Quote ID value appropriately for SQL.
+     */
+    protected function quoteIdValue($idVal)
+    {
+        if (is_int($idVal) || is_float($idVal) || (is_string($idVal) && is_numeric($idVal))) {
+            return $idVal;
+        }
+
+        return $this->database->connection->quote((string) $idVal);
     }
 
     /**
@@ -659,10 +816,29 @@ class Collection
      */
     public function update($criteria, array $data, bool $merge = true): int
     {
-        // allow beforeUpdate hooks to modify criteria/data
+        // Apply before update hooks to modify criteria/data
+        $this->applyUpdateHooks($criteria, $data);
+
+        // Build query to find documents matching criteria
+        $documentsToUpdate = $this->findDocumentsToUpdate($criteria);
+
+        $updated = 0;
+
+        foreach ($documentsToUpdate as $doc) {
+            $updated += $this->updateDocument($doc, $data, $merge);
+        }
+
+        return $updated;
+    }
+
+    /**
+     * Apply before update hooks to modify criteria/data.
+     */
+    protected function applyUpdateHooks(&$criteria, array &$data): void
+    {
         if (!empty($this->hooks['beforeUpdate'])) {
-            foreach ($this->hooks['beforeUpdate'] as $h) {
-                $ret = $h($criteria, $data);
+            foreach ($this->hooks['beforeUpdate'] as $hook) {
+                $ret = $hook($criteria, $data);
                 if (is_array($ret)) {
                     if (isset($ret['criteria'])) {
                         $criteria = $ret['criteria'];
@@ -680,7 +856,13 @@ class Collection
                 }
             }
         }
+    }
 
+    /**
+     * Find documents matching criteria for update.
+     */
+    protected function findDocumentsToUpdate($criteria): array
+    {
         if (is_array($criteria) && $this->_canTranslateToJsonWhere($criteria)) {
             $where = $this->_buildJsonWhere($criteria);
             $sql = 'SELECT id, document FROM '.$this->name.' WHERE '.$where;
@@ -689,63 +871,88 @@ class Collection
         }
 
         $stmt = $this->database->connection->query($sql);
-        $result = $stmt ? $stmt->fetchAll(\PDO::FETCH_ASSOC) : [];
 
-        foreach ($result as $doc) {
-            $_doc = $this->decodeStored($doc['document']);
+        return $stmt ? $stmt->fetchAll(\PDO::FETCH_ASSOC) : [];
+    }
 
-            // Handle null case for $_doc
-            if ($_doc === null) {
-                $_doc = [];
+    /**
+     * Update a single document.
+     */
+    protected function updateDocument(array $doc, array $data, bool $merge): int
+    {
+        $_doc = $this->decodeStored($doc['document']);
+
+        // Handle null case for $_doc
+        if ($_doc === null) {
+            $_doc = [];
+        }
+
+        $document = $this->mergeDocumentData($_doc, $data, $merge);
+
+        $encoded = $this->encodeStored($document);
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            // Skip this document update if encoding fails
+            return 0;
+        }
+
+        // Execute update with searchable columns
+        $this->executeDocumentUpdate($doc['id'], $document, $encoded);
+
+        // Trigger after update hooks
+        $this->triggerAfterUpdateHooks($_doc, $document);
+
+        return 1;
+    }
+
+    /**
+     * Merge document data based on merge flag.
+     */
+    protected function mergeDocumentData(array $originalDoc, array $newData, bool $merge): array
+    {
+        if ($merge) {
+            return \array_merge($originalDoc, $newData);
+        } else {
+            $document = $newData;
+            // Preserve the _id field if it exists in the original document
+            if (isset($originalDoc['_id'])) {
+                $document['_id'] = $originalDoc['_id'];
             }
 
-            if ($merge) {
-                $document = \array_merge($_doc, $data);
-            } else {
-                $document = $data;
+            return $document;
+        }
+    }
 
-                // Preserve the _id field if it exists in the original document
-                if (isset($_doc['_id'])) {
-                    $document['_id'] = $_doc['_id'];
-                }
-            }
+    /**
+     * Execute the actual document update in database.
+     */
+    protected function executeDocumentUpdate(int $docId, array $document, string $encoded): void
+    {
+        // Include searchable columns when present
+        $indexData = $this->_computeSearchIndexValues($document);
+        $assign = [];
+        $assign[] = 'document='.$this->database->connection->quote($encoded);
+        foreach ($indexData as $col => $val) {
+            $assign[] = $col.'='.(is_null($val) ? 'NULL' : $this->database->connection->quote($val));
+        }
 
-            $encoded = $this->encodeStored($document);
-            if (json_last_error() !== JSON_ERROR_NONE) {
-                // skip this document update if encoding fails
-                continue;
-            }
+        $sql = 'UPDATE '.$this->name.' SET '.implode(',', $assign).' WHERE id='.$docId;
+        $this->database->connection->exec($sql);
+    }
 
-            // include searchable columns when present
-            $indexData = $this->_computeSearchIndexValues($document);
-            $assign = [];
-            $assign[] = 'document='.$this->database->connection->quote($encoded);
-            foreach ($indexData as $col => $val) {
-                $assign[] = $col.'='.(is_null($val) ? 'NULL' : $this->database->connection->quote($val));
-            }
-
-            $sql = 'UPDATE '.$this->name.' SET '.implode(',', $assign).' WHERE id='.$doc['id'];
-
-            $this->database->connection->exec($sql);
-
-            // trigger afterUpdate hooks with original and updated document
-            if (!empty($this->hooks['afterUpdate'])) {
-                foreach ($this->hooks['afterUpdate'] as $h) {
-                    try {
-                        $h($_doc, $document);
-                    } catch (\Throwable $e) {
-                        // ignore hook errors
-                    }
+    /**
+     * Trigger after update hooks with original and updated document.
+     */
+    protected function triggerAfterUpdateHooks(array $originalDoc, array $updatedDocument): void
+    {
+        if (!empty($this->hooks['afterUpdate'])) {
+            foreach ($this->hooks['afterUpdate'] as $hook) {
+                try {
+                    $hook($originalDoc, $updatedDocument);
+                } catch (\Throwable $e) {
+                    // Ignore hook errors
                 }
             }
         }
-
-        $updated = count($result);
-        if ($updated > 0) {
-            // no in-memory cache to flush
-        }
-
-        return $updated;
     }
 
     /**
@@ -755,7 +962,26 @@ class Collection
      */
     public function remove($criteria): int
     {
-        // Fetch matching rows so we can run hooks per-document
+        // Find documents matching removal criteria
+        $documentsToRemove = $this->findDocumentsToRemove($criteria);
+
+        $deleted = 0;
+
+        foreach ($documentsToRemove as $row) {
+            if ($this->shouldRemoveDocument($row)) {
+                $this->removeDocument($row['id'], $row['document']);
+                ++$deleted;
+            }
+        }
+
+        return $deleted;
+    }
+
+    /**
+     * Find documents matching criteria for removal.
+     */
+    protected function findDocumentsToRemove($criteria): array
+    {
         if (is_array($criteria) && $this->_canTranslateToJsonWhere($criteria)) {
             $where = $this->_buildJsonWhere($criteria);
             $sql = 'SELECT id, document FROM '.$this->name.' WHERE '.$where;
@@ -764,54 +990,63 @@ class Collection
         }
 
         $stmt = $this->database->connection->query($sql);
-        $result = $stmt ? $stmt->fetchAll(\PDO::FETCH_ASSOC) : [];
 
-        $deleted = 0;
+        return $stmt ? $stmt->fetchAll(\PDO::FETCH_ASSOC) : [];
+    }
 
-        foreach ($result as $row) {
-            $doc = $this->decodeStored($row['document']) ?: [];
+    /**
+     * Check if document should be removed based on before-remove hooks.
+     */
+    protected function shouldRemoveDocument(array $row): bool
+    {
+        $doc = $this->decodeStored($row['document']) ?: [];
 
-            // Before remove hooks can veto by returning false
-            $skip = false;
-            if (!empty($this->hooks['beforeRemove'])) {
-                foreach ($this->hooks['beforeRemove'] as $h) {
-                    try {
-                        $ret = $h($doc);
-                        if ($ret === false) {
-                            $skip = true;
-                            break;
-                        }
-                    } catch (\Throwable $e) {
-                        // ignore hook errors
+        // Before remove hooks can veto by returning false
+        if (!empty($this->hooks['beforeRemove'])) {
+            foreach ($this->hooks['beforeRemove'] as $hook) {
+                try {
+                    $ret = $hook($doc);
+                    if ($ret === false) {
+                        return false;
                     }
-                }
-            }
-
-            if ($skip) {
-                continue;
-            }
-
-            // perform deletion by id
-            $delSql = 'DELETE FROM '.$this->name.' WHERE id='.$row['id'];
-            $this->database->connection->exec($delSql);
-            ++$deleted;
-
-            // afterRemove hooks
-            if (!empty($this->hooks['afterRemove'])) {
-                foreach ($this->hooks['afterRemove'] as $h) {
-                    try {
-                        $h($doc);
-                    } catch (\Throwable $e) {
-                    }
+                } catch (\Throwable $e) {
+                    // Ignore hook errors
                 }
             }
         }
 
-        if ($deleted > 0) {
-            // no in-memory cache to flush
-        }
+        return true;
+    }
 
-        return $deleted;
+    /**
+     * Remove a single document from the database.
+     */
+    protected function removeDocument(int $docId, string $document): void
+    {
+        $doc = $this->decodeStored($document) ?: [];
+
+        // Perform deletion by id
+        $delSql = 'DELETE FROM '.$this->name.' WHERE id='.$docId;
+        $this->database->connection->exec($delSql);
+
+        // Trigger after remove hooks
+        $this->triggerAfterRemoveHooks($doc);
+    }
+
+    /**
+     * Trigger after remove hooks with the removed document.
+     */
+    protected function triggerAfterRemoveHooks(array $document): void
+    {
+        if (!empty($this->hooks['afterRemove'])) {
+            foreach ($this->hooks['afterRemove'] as $hook) {
+                try {
+                    $hook($document);
+                } catch (\Throwable $e) {
+                    // Ignore hook errors
+                }
+            }
+        }
     }
 
     /**
@@ -904,106 +1139,154 @@ class Collection
     {
         $parts = [];
         foreach ($criteria as $key => $value) {
-            $path = '$.'.str_replace("'", "\\'", $key);
-
-            // If this key is configured as searchable, use the si_{key} column
-            if (isset($this->searchableFields[$key])) {
-                $expr = "si_{$key}";
-                // If the searchable field is configured with hashing, pre-hash
-                // the comparison value so callers may still pass the plain value.
-                if (is_array($value)) {
-                    // operator-style value -- hash individual operands where appropriate
-                    $cfg = $this->searchableFields[$key];
-                    if (!empty($cfg['hash'])) {
-                        $new = [];
-                        foreach ($value as $op => $v) {
-                            if (in_array($op, ['$in', '$nin'], true) && is_array($v)) {
-                                $hvals = [];
-                                foreach ($v as $vv) {
-                                    $hvals[] = hash('sha256', (string) $vv);
-                                }
-                                $new[$op] = $hvals;
-                            } else {
-                                $new[$op] = is_array($v) ? $v : hash('sha256', (string) $v);
-                            }
-                        }
-                        $value = $new;
-                    }
-                } else {
-                    if (!empty($this->searchableFields[$key]['hash'])) {
-                        $value = hash('sha256', (string) $value);
-                    }
-                }
-            } else {
-                $expr = "json_extract(document, '".$path."')";
-            }
-
-            if (is_array($value)) {
-                // support basic operators: $gt, $gte, $lt, $lte, $in, $nin, $exists
-                foreach ($value as $op => $v) {
-                    switch ($op) {
-                        case '$gt':
-                            $val = is_numeric($v) ? $v : $this->database->connection->quote((string) $v);
-                            $parts[] = "{$expr} > {$val}";
-                            break;
-                        case '$gte':
-                            $val = is_numeric($v) ? $v : $this->database->connection->quote((string) $v);
-                            $parts[] = "{$expr} >= {$val}";
-                            break;
-                        case '$lt':
-                            $val = is_numeric($v) ? $v : $this->database->connection->quote((string) $v);
-                            $parts[] = "{$expr} < {$val}";
-                            break;
-                        case '$lte':
-                            $val = is_numeric($v) ? $v : $this->database->connection->quote((string) $v);
-                            $parts[] = "{$expr} <= {$val}";
-                            break;
-                        case '$in':
-                            if (!is_array($v) || empty($v)) {
-                                $parts[] = '0';
-                                break;
-                            }
-                            $vals = [];
-                            foreach ($v as $item) {
-                                $vals[] = is_numeric($item) ? $item : $this->database->connection->quote((string) $item);
-                            }
-                            $parts[] = "{$expr} IN (".implode(',', $vals).')';
-                            break;
-                        case '$nin':
-                            if (!is_array($v) || empty($v)) {
-                                // nothing to exclude
-                                break;
-                            }
-                            $vals = [];
-                            foreach ($v as $item) {
-                                $vals[] = is_numeric($item) ? $item : $this->database->connection->quote((string) $item);
-                            }
-                            $parts[] = "{$expr} NOT IN (".implode(',', $vals).')';
-                            break;
-                        case '$exists':
-                            $parts[] = $v ? "{$expr} IS NOT NULL" : "{$expr} IS NULL";
-                            break;
-                        default:
-                            // unsupported operator - fallback to strict equality check on string representation
-                            $val = $this->database->connection->quote((string) $v);
-                            $parts[] = "{$expr} = {$val}";
-                    }
-                }
-            } else {
-                if (is_int($value) || is_float($value) || (is_string($value) && is_numeric($value))) {
-                    $val = $value;
-                } elseif (is_bool($value)) {
-                    // Use numeric boolean representation for comparison
-                    $val = $value ? '1' : '0';
-                } else {
-                    $val = $this->database->connection->quote((string) $value);
-                }
-
-                $parts[] = "{$expr} = {$val}";
-            }
+            $expr = $this->buildExpressionForKey($key, $value);
+            $condition = $this->buildConditionForValue($expr, $value);
+            $parts[] = $condition;
         }
 
         return implode(' AND ', $parts);
+    }
+
+    /**
+     * Build expression for a given key considering searchable fields.
+     */
+    private function buildExpressionForKey(string $key, $value): string
+    {
+        $path = '$.'.str_replace("'", "\\'", $key);
+
+        // If this key is configured as searchable, use the searchable column
+        if (isset($this->searchableFields[$key])) {
+            return self::SEARCHABLE_PREFIX.$key;
+        }
+
+        return "json_extract(document, '".$path."')";
+    }
+
+    /**
+     * Build condition for a given expression and value.
+     */
+    private function buildConditionForValue(string $expr, $value): string
+    {
+        if (is_array($value)) {
+            return $this->buildOperatorCondition($expr, $value);
+        }
+
+        return $this->buildEqualityCondition($expr, $value);
+    }
+
+    /**
+     * Build condition for operators ($gt, $gte, $lt, $lte, $in, $nin, $exists).
+     */
+    private function buildOperatorCondition(string $expr, array $operators): string
+    {
+        $conditions = [];
+
+        foreach ($operators as $op => $v) {
+            $condition = $this->buildSingleOperatorCondition($expr, $op, $v);
+            if ($condition) {
+                $conditions[] = $condition;
+            }
+        }
+
+        return implode(' AND ', $conditions);
+    }
+
+    /**
+     * Build condition for a single operator.
+     */
+    private function buildSingleOperatorCondition(string $expr, string $op, $value): ?string
+    {
+        switch ($op) {
+            case self::JSON_OP_GT:
+                return $this->buildComparisonCondition($expr, '>', $value);
+            case self::JSON_OP_GTE:
+                return $this->buildComparisonCondition($expr, '>=', $value);
+            case self::JSON_OP_LT:
+                return $this->buildComparisonCondition($expr, '<', $value);
+            case self::JSON_OP_LTE:
+                return $this->buildComparisonCondition($expr, '<=', $value);
+            case self::JSON_OP_IN:
+                return $this->buildInCondition($expr, $value, false);
+            case self::JSON_OP_NIN:
+                return $this->buildInCondition($expr, $value, true);
+            case self::JSON_OP_EXISTS:
+                return $value ? "{$expr} IS NOT NULL" : "{$expr} IS NULL";
+            default:
+                // unsupported operator - fallback to strict equality check
+                return $this->buildEqualityCondition($expr, $value);
+        }
+    }
+
+    /**
+     * Build comparison condition (>, >=, <, <=).
+     */
+    private function buildComparisonCondition(string $expr, string $operator, $value): string
+    {
+        // If this is a searchable field with hashing, hash the value
+        if (strpos($expr, self::SEARCHABLE_PREFIX) === 0) {
+            $field = substr($expr, strlen(self::SEARCHABLE_PREFIX));
+            if (isset($this->searchableFields[$field]) && $this->searchableFields[$field]['hash']) {
+                $value = hash('sha256', (string) $value);
+            }
+        }
+
+        $val = is_numeric($value) ? $value : $this->database->connection->quote((string) $value);
+
+        return "{$expr} {$operator} {$val}";
+    }
+
+    /**
+     * Build IN/NOT IN condition.
+     */
+    private function buildInCondition(string $expr, array $values, bool $notIn): ?string
+    {
+        if (empty($values)) {
+            return $notIn ? null : '0'; // Return false condition for empty IN
+        }
+
+        // If this is a searchable field with hashing, hash the values
+        if (strpos($expr, self::SEARCHABLE_PREFIX) === 0) {
+            $field = substr($expr, strlen(self::SEARCHABLE_PREFIX));
+            if (isset($this->searchableFields[$field]) && $this->searchableFields[$field]['hash']) {
+                $values = array_map(function ($v) {
+                    return is_array($v) ? $v : hash('sha256', (string) $v);
+                }, $values);
+            }
+        }
+
+        $vals = [];
+        foreach ($values as $item) {
+            $vals[] = is_numeric($item) ? $item : $this->database->connection->quote((string) $item);
+        }
+
+        $operator = $notIn ? 'NOT IN' : 'IN';
+
+        return "{$expr} {$operator} (".implode(',', $vals).')';
+    }
+
+    /**
+     * Build equality condition.
+     */
+    private function buildEqualityCondition(string $expr, $value): string
+    {
+        // If this is a searchable field with hashing, hash the value
+        if (strpos($expr, self::SEARCHABLE_PREFIX) === 0) {
+            $field = substr($expr, strlen(self::SEARCHABLE_PREFIX));
+            if (isset($this->searchableFields[$field]) && $this->searchableFields[$field]['hash']) {
+                $value = hash('sha256', (string) $value);
+            }
+        }
+
+        if (is_int($value) || is_float($value) || (is_string($value) && is_numeric($value))) {
+            $val = $value;
+        } elseif (is_bool($value)) {
+            // Use numeric boolean representation for comparison
+            $val = $value ? '1' : '0';
+        } else {
+            $val = $this->database->connection->quote((string) $value);
+        }
+
+        return "{$expr} = {$val}";
     }
 
     /**

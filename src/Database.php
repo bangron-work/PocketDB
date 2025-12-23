@@ -3,58 +3,28 @@
 namespace PocketDB;
 
 /**
- * Database object.
+ * Database object for managing SQLite database connections and operations.
  */
 class Database
 {
-    /**
-     * @var string - DSN path form memory database
-     */
+    // Constants
     public const DSN_PATH_MEMORY = ':memory:';
+    private const COLLECTION_NAME_REGEX = '/^[A-Za-z0-9_]+$/';
+    private const IDENTIFIER_REGEX = '/^[A-Za-z0-9_]+$/';
 
-    /** @var \PDO|mixed */
-    public $connection;
-
-    /**
-     * Raw options passed to constructor (PDO options + custom options)
-     *
-     * @var array
-     */
-    protected array $options = [];
-
-    /**
-     * Optional encryption key (application-level AES-256) if provided in options
-     */
+    // Instance properties
+    public string $path;
+    public ?Client $client = null;
     public ?string $encryptionKey = null;
-
-    /**
-     * @var array<string,\PocketDB\Collection>
-     */
+    protected array $options = [];
     protected array $collections = [];
 
-    public string $path;
-
-    /**
-     * Back-reference to the owning Client (if any).
-     */
-    public ?Client $client = null;
-
-    /**
-     * @var array<string,callable>
-     */
+    // Connection and criteria
+    public $connection;
     protected array $document_criterias = [];
 
-    /**
-     * Static registry for criteria id -> weak reference of Database.
-     *
-     * @var array<string,mixed>
-     */
+    // Static registry for managing database instances
     protected static array $criteria_registry = [];
-    /**
-     * Weak refs to all Database instances (to allow closing lingering connections).
-     *
-     * @var array<int,mixed>
-     */
     protected static array $instances = [];
 
     /**
@@ -62,55 +32,51 @@ class Database
      */
     public function __construct(string $path = self::DSN_PATH_MEMORY, array $options = [])
     {
-        $dns = "sqlite:{$path}";
         $this->path = $path;
         $this->options = $options;
         $this->encryptionKey = $options['encryption_key'] ?? null;
 
-        $this->connection = new \PDO($dns, null, null, $options);
+        $this->connection = $this->createConnection();
+        $this->setupDatabaseFunctions();
+        $this->configureDatabaseSettings();
+        $this->registerInstance();
+    }
 
-        $database = $this;
+    /**
+     * Create PDO connection.
+     */
+    private function createConnection(): \PDO
+    {
+        $dsn = "sqlite:{$this->path}";
 
-        $this->connection->sqliteCreateFunction('document_key', function ($key, $document) {
-            // Handle null document case
-            if ($document === null) {
-                return '';
-            }
+        return new \PDO($dsn, null, null, $this->options);
+    }
 
-            $document = \json_decode($document, true);
-
-            if ($document === null || !is_array($document)) {
-                return '';
-            }
-
-            $val = '';
-
-            if (strpos($key, '.') !== false) {
-                $keys = \explode('.', $key);
-                $ref = $document;
-                foreach ($keys as $k) {
-                    if (!is_array($ref) || !array_key_exists($k, $ref)) {
-                        $ref = null;
-                        break;
-                    }
-                    $ref = $ref[$k];
-                }
-                $val = $ref ?? '';
-            } else {
-                $val = array_key_exists($key, $document) ? $document[$key] : '';
-            }
-
-            return \is_array($val) || \is_object($val) ? \json_encode($val) : $val;
-        }, 2);
-
+    /**
+     * Setup custom SQLite functions.
+     */
+    private function setupDatabaseFunctions(): void
+    {
+        $this->connection->sqliteCreateFunction('document_key', [$this, 'createDocumentKeyFunction'], 2);
         $this->connection->sqliteCreateFunction('document_criteria', ['\\PocketDB\\Database', 'staticCallCriteria'], 2);
+    }
 
+    /**
+     * Configure database settings for performance.
+     */
+    private function configureDatabaseSettings(): void
+    {
         // Prefer Write-Ahead Logging for better concurrency and reliability
         $this->connection->exec('PRAGMA journal_mode = WAL');
         $this->connection->exec('PRAGMA synchronous = NORMAL');
         $this->connection->exec('PRAGMA PAGE_SIZE = 4096');
+    }
 
-        // register weak reference to this instance
+    /**
+     * Register database instance for cleanup.
+     */
+    private function registerInstance(): void
+    {
         if (class_exists('WeakReference')) {
             self::$instances[] = \WeakReference::create($this);
         } else {
@@ -119,26 +85,64 @@ class Database
     }
 
     /**
+     * Document key function for SQLite.
+     */
+    public function createDocumentKeyFunction(string $key, $document): string
+    {
+        if ($document === null) {
+            return '';
+        }
+
+        $document = json_decode($document, true);
+        if ($document === null || !is_array($document)) {
+            return '';
+        }
+
+        $value = $this->extractDocumentValue($document, $key);
+
+        return is_array($value) || is_object($value) ? json_encode($value) : $value;
+    }
+
+    /**
+     * Extract value from document using key (supports dot notation).
+     */
+    private function extractDocumentValue(array $document, string $key): string
+    {
+        if (strpos($key, '.') !== false) {
+            return $this->extractNestedValue($document, $key);
+        }
+
+        return array_key_exists($key, $document) ? $document[$key] : '';
+    }
+
+    /**
+     * Extract nested value using dot notation.
+     */
+    private function extractNestedValue(array $document, string $key): string
+    {
+        $keys = explode('.', $key);
+        $ref = $document;
+
+        foreach ($keys as $k) {
+            if (!is_array($ref) || !array_key_exists($k, $ref)) {
+                return '';
+            }
+            $ref = $ref[$k];
+        }
+
+        return $ref;
+    }
+
+    /**
      * Attach another SQLite database file to this connection with an alias.
-     * Returns true on success.
-     *
-     * Note: alias must be a simple identifier (letters, numbers, underscore).
      */
     public function attach(string $path, string $alias): bool
     {
-        // validate alias
-        if (!preg_match('/^[a-zA-Z0-9_]+$/', $alias)) {
-            throw new \InvalidArgumentException('Invalid alias for attach: '.$alias);
-        }
-
-        // ensure absolute path when possible
-        $p = $path;
-
-        // quote path for SQL
-        $quoted = $this->connection->quote($p);
+        $this->validateAlias($alias);
+        $quotedPath = $this->connection->quote($path);
 
         try {
-            $this->connection->exec('ATTACH DATABASE '.$quoted.' AS '.$alias);
+            $this->connection->exec('ATTACH DATABASE '.$quotedPath.' AS '.$alias);
 
             return true;
         } catch (\Throwable $e) {
@@ -147,13 +151,21 @@ class Database
     }
 
     /**
-     * Detach previously attached database alias. Returns true on success.
+     * Validate database alias.
+     */
+    private function validateAlias(string $alias): void
+    {
+        if (!preg_match(self::IDENTIFIER_REGEX, $alias)) {
+            throw new \InvalidArgumentException('Invalid alias for attach: '.$alias);
+        }
+    }
+
+    /**
+     * Detach previously attached database alias.
      */
     public function detach(string $alias): bool
     {
-        if (!preg_match('/^[a-zA-Z0-9_]+$/', $alias)) {
-            throw new \InvalidArgumentException('Invalid alias for detach: '.$alias);
-        }
+        $this->validateAlias($alias);
 
         try {
             $this->connection->exec('DETACH DATABASE '.$alias);
@@ -166,9 +178,6 @@ class Database
 
     /**
      * Attach, run a callback, then detach in a safe finally block.
-     * The callback receives the current Database instance and the alias string.
-     * Returns whatever the callback returns.
-     * Throws if attach fails or if the callback throws (callback exception is rethrown after detach).
      */
     public function attachOnce(string $path, string $alias, callable $callback)
     {
@@ -179,11 +188,19 @@ class Database
         try {
             return $callback($this, $alias);
         } finally {
-            // best-effort detach; ignore detach failures but ensure we attempted it
-            try {
-                $this->detach($alias);
-            } catch (\Throwable $_) {
-            }
+            $this->safeDetach($alias);
+        }
+    }
+
+    /**
+     * Safely detach database ignoring errors.
+     */
+    private function safeDetach(string $alias): void
+    {
+        try {
+            $this->detach($alias);
+        } catch (\Throwable $_) {
+            // Ignore detach failures but ensure we attempted it
         }
     }
 
@@ -192,18 +209,27 @@ class Database
      */
     public static function closeAll(): void
     {
-        foreach (self::$instances as $k => $ref) {
-            if (is_object($ref) && $ref instanceof \WeakReference) {
-                $db = $ref->get();
-                if ($db) {
-                    $db->close();
-                }
-            } elseif (is_object($ref)) {
-                $ref->close();
-            }
-            unset(self::$instances[$k]);
+        foreach (self::$instances as $key => $ref) {
+            self::closeInstance($ref, $key);
         }
         self::$instances = [];
+    }
+
+    /**
+     * Close a single database instance.
+     */
+    private static function closeInstance($ref, int $key): void
+    {
+        if (is_object($ref) && $ref instanceof \WeakReference) {
+            $db = $ref->get();
+            if ($db) {
+                $db->close();
+            }
+        } elseif (is_object($ref)) {
+            $ref->close();
+        }
+
+        unset(self::$instances[$key]);
     }
 
     /**
@@ -211,18 +237,26 @@ class Database
      */
     public function close(): void
     {
-        // cleanup registered criteria weak refs
+        $this->cleanupCriteriaRegistry();
+        $this->document_criterias = [];
+        $this->connection = null;
+    }
+
+    /**
+     * Clean up criteria registry.
+     */
+    private function cleanupCriteriaRegistry(): void
+    {
         foreach (array_keys($this->document_criterias) as $id) {
             if (isset(self::$criteria_registry[$id])) {
                 unset(self::$criteria_registry[$id]);
             }
         }
-
-        $this->document_criterias = [];
-
-        $this->connection = null;
     }
 
+    /**
+     * Destructor to ensure connection is closed.
+     */
     public function __destruct()
     {
         $this->close();
@@ -230,63 +264,72 @@ class Database
 
     /**
      * Register Criteria function.
-     *
-     * @return mixed
      */
     public function registerCriteriaFunction($criteria): ?string
     {
-        $id = \uniqid('criteria');
+        $id = uniqid('criteria');
 
-        if (\is_callable($criteria)) {
-            $this->document_criterias[$id] = $criteria;
-
-            // make callable criteria discoverable by SQLite static callback
-            if (class_exists('WeakReference')) {
-                self::$criteria_registry[$id] = \WeakReference::create($this);
-            } else {
-                self::$criteria_registry[$id] = $this;
-            }
-
-            return $id;
+        if (is_callable($criteria)) {
+            return $this->registerCallableCriteria($id, $criteria);
         }
 
         if (is_array($criteria)) {
-            // Build a pure PHP closure that uses UtilArrayQuery::check to evaluate
-            // the criteria against decoded document arrays. Avoid any string
-            // evaluation or eval() usage to eliminate code injection risks.
-            $fn = function ($document) use ($criteria) {
-                // Expect $document to be an array (staticCallCriteria decodes JSON)
-                if (!\is_array($document)) {
-                    return false;
-                }
-
-                return UtilArrayQuery::match($criteria, $document);
-            };
-
-            $this->document_criterias[$id] = $fn;
-            // store weak reference in static registry so sqlite callback can find this DB without
-            // creating a strong reference cycle
-            if (class_exists('WeakReference')) {
-                self::$criteria_registry[$id] = \WeakReference::create($this);
-            } else {
-                // fallback (older PHP) - store strong ref (may keep object alive)
-                self::$criteria_registry[$id] = $this;
-            }
-
-            return $id;
+            return $this->registerArrayCriteria($id, $criteria);
         }
 
         return null;
     }
 
     /**
-     * Execute registred criteria function.
-     *
-     * @param array $document
+     * Register callable criteria function.
+     */
+    private function registerCallableCriteria(string $id, callable $criteria): string
+    {
+        $this->document_criterias[$id] = $criteria;
+        $this->registerWeakReference($id);
+
+        return $id;
+    }
+
+    /**
+     * Register array-based criteria function.
+     */
+    private function registerArrayCriteria(string $id, array $criteria): string
+    {
+        $fn = function ($document) use ($criteria) {
+            if (!is_array($document)) {
+                return false;
+            }
+
+            return UtilArrayQuery::match($criteria, $document);
+        };
+
+        $this->document_criterias[$id] = $fn;
+        $this->registerWeakReference($id);
+
+        return $id;
+    }
+
+    /**
+     * Register weak reference for criteria.
+     */
+    private function registerWeakReference(string $id): void
+    {
+        if (class_exists('WeakReference')) {
+            self::$criteria_registry[$id] = \WeakReference::create($this);
+        } else {
+            self::$criteria_registry[$id] = $this;
+        }
+    }
+
+    /**
+     * Execute registered criteria function.
      */
     public function callCriteriaFunction(string $id, $document): bool
     {
-        return isset($this->document_criterias[$id]) ? $this->document_criterias[$id]($document) : false;
+        return isset($this->document_criterias[$id])
+            ? $this->document_criterias[$id]($document)
+            : false;
     }
 
     /**
@@ -298,30 +341,36 @@ class Database
             return false;
         }
 
-        $ref = self::$criteria_registry[$id];
+        $db = self::resolveDatabaseReference(self::$criteria_registry[$id]);
+        if ($db === null) {
+            unset(self::$criteria_registry[$id]);
 
-        if (is_object($ref) && $ref instanceof \WeakReference) {
-            $db = $ref->get();
-            if ($db === null) {
-                unset(self::$criteria_registry[$id]);
-
-                return false;
-            }
-        } else {
-            $db = $ref;
+            return false;
         }
 
         if ($document === null) {
             return false;
         }
 
-        $document = \json_decode($document, true);
+        $document = json_decode($document, true);
 
         return $db->callCriteriaFunction($id, $document);
     }
 
     /**
-     * Vacuum database.
+     * Resolve database reference from registry.
+     */
+    private static function resolveDatabaseReference($ref): ?Database
+    {
+        if (is_object($ref) && $ref instanceof \WeakReference) {
+            return $ref->get();
+        }
+
+        return $ref;
+    }
+
+    /**
+     * Vacuum database to reclaim space.
      */
     public function vacuum(): void
     {
@@ -329,14 +378,13 @@ class Database
     }
 
     /**
-     * Drop database.
+     * Drop database file (for non-memory databases).
      */
     public function drop(): void
     {
-        if ($this->path != static::DSN_PATH_MEMORY) {
-            // ensure connection closed before unlinking file on Windows
+        if ($this->path !== static::DSN_PATH_MEMORY) {
             $this->close();
-            \unlink($this->path);
+            unlink($this->path);
         }
     }
 
@@ -345,11 +393,27 @@ class Database
      */
     public function createCollection(string $name): void
     {
-        if (!preg_match('/^[A-Za-z0-9_]+$/', $name)) {
+        $this->validateCollectionName($name);
+        $this->executeCreateCollection($name);
+    }
+
+    /**
+     * Validate collection name.
+     */
+    private function validateCollectionName(string $name): void
+    {
+        if (!preg_match(self::COLLECTION_NAME_REGEX, $name)) {
             throw new \InvalidArgumentException('Invalid collection name: '.$name);
         }
+    }
 
-        $this->connection->exec("CREATE TABLE IF NOT EXISTS `{$name}` ( id INTEGER PRIMARY KEY AUTOINCREMENT, document TEXT )");
+    /**
+     * Execute collection creation.
+     */
+    private function executeCreateCollection(string $name): void
+    {
+        $sql = "CREATE TABLE IF NOT EXISTS `{$name}` ( id INTEGER PRIMARY KEY AUTOINCREMENT, document TEXT )";
+        $this->connection->exec($sql);
     }
 
     /**
@@ -357,13 +421,25 @@ class Database
      */
     public function dropCollection(string $name): void
     {
-        if (!preg_match('/^[A-Za-z0-9_]+$/', $name)) {
-            throw new \InvalidArgumentException('Invalid collection name: '.$name);
-        }
+        $this->validateCollectionName($name);
+        $this->executeDropCollection($name);
+        $this->removeCollectionFromCache($name);
+    }
 
-        $this->connection->exec("DROP TABLE IF EXISTS `{$name}`");
+    /**
+     * Execute collection drop.
+     */
+    private function executeDropCollection(string $name): void
+    {
+        $sql = "DROP TABLE IF EXISTS `{$name}`";
+        $this->connection->exec($sql);
+    }
 
-        // Remove collection from cache
+    /**
+     * Remove collection from cache.
+     */
+    private function removeCollectionFromCache(string $name): void
+    {
         unset($this->collections[$name]);
     }
 
@@ -372,15 +448,11 @@ class Database
      */
     public function getCollectionNames(): array
     {
-        $stmt = $this->connection->query("SELECT name FROM sqlite_master WHERE type='table' AND name!='sqlite_sequence';");
-        $tables = $stmt->fetchAll(\PDO::FETCH_ASSOC);
-        $names = [];
+        $sql = "SELECT name FROM sqlite_master WHERE type='table' AND name!='sqlite_sequence'";
+        $stmt = $this->connection->query($sql);
+        $tables = $stmt ? $stmt->fetchAll(\PDO::FETCH_ASSOC) : [];
 
-        foreach ($tables as $table) {
-            $names[] = $table['name'];
-        }
-
-        return $names;
+        return array_column($tables, 'name');
     }
 
     /**
@@ -389,32 +461,38 @@ class Database
     public function listCollections(): array
     {
         foreach ($this->getCollectionNames() as $name) {
-            if (!isset($this->collections[$name])) {
-                $this->collections[$name] = new Collection($name, $this);
-            }
+            $this->ensureCollectionLoaded($name);
         }
 
         return $this->collections;
     }
 
     /**
-     * Select collection.
-     *
-     * @return object
+     * Ensure collection is loaded into cache.
      */
-    public function selectCollection(string $name): Collection
+    private function ensureCollectionLoaded(string $name): void
     {
         if (!isset($this->collections[$name])) {
             if (!in_array($name, $this->getCollectionNames())) {
                 $this->createCollection($name);
             }
-
             $this->collections[$name] = new Collection($name, $this);
         }
+    }
+
+    /**
+     * Select collection.
+     */
+    public function selectCollection(string $name): Collection
+    {
+        $this->ensureCollectionLoaded($name);
 
         return $this->collections[$name];
     }
 
+    /**
+     * Magic getter for collection access.
+     */
     public function __get(string $collection): Collection
     {
         return $this->selectCollection($collection);
@@ -425,23 +503,32 @@ class Database
      */
     public function createJsonIndex(string $collection, string $field, ?string $indexName = null): void
     {
-        if (!preg_match('/^[A-Za-z0-9_]+$/', $collection)) {
-            throw new \InvalidArgumentException('Invalid collection name: '.$collection);
-        }
+        $this->validateCollectionName($collection);
 
-        $name = $indexName ?? sprintf('idx_%s_%s', $collection, preg_replace('/[^a-zA-Z0-9_]/', '_', $field));
+        $indexName = $indexName ?? $this->generateIndexName($collection, $field);
         $path = '$.'.str_replace("'", "\\'", $field);
-        $sql = 'CREATE INDEX IF NOT EXISTS '.$name.' ON '.$collection." (json_extract(document, '".$path."'))";
+        $sql = 'CREATE INDEX IF NOT EXISTS '.$indexName.' ON '.$collection.
+               " (json_extract(document, '".$path."'))";
+
         $this->connection->exec($sql);
     }
 
     /**
+     * Generate index name.
+     */
+    private function generateIndexName(string $collection, string $field): string
+    {
+        $sanitizedField = preg_replace('/[^a-zA-Z0-9_]/', '_', $field);
+
+        return sprintf('idx_%s_%s', $collection, $sanitizedField);
+    }
+
+    /**
      * Quote an identifier (table/index/column name) in a safe manner.
-     * Throws InvalidArgumentException for invalid identifiers.
      */
     public function quoteIdentifier(string $name): string
     {
-        if (!preg_match('/^[A-Za-z0-9_]+$/', $name)) {
+        if (!preg_match(self::IDENTIFIER_REGEX, $name)) {
             throw new \InvalidArgumentException('Invalid identifier: '.$name);
         }
 
@@ -453,7 +540,8 @@ class Database
      */
     public function dropIndex(string $indexName): void
     {
-        $this->connection->exec('DROP INDEX IF EXISTS '.$indexName);
+        $sql = 'DROP INDEX IF EXISTS '.$indexName;
+        $this->connection->exec($sql);
     }
 }
 

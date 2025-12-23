@@ -2,25 +2,34 @@
 
 namespace PocketDB;
 
+/**
+ * Cursor for iterating over query results.
+ */
 class Cursor implements \IteratorAggregate
 {
+    // Iterator state
     protected int $position = 0;
     protected ?\PDOStatement $stmt = null;
     protected ?array $currentRow = null;
     protected ?string $criteriaSql = null;
     protected int $lastKey = -1;
 
+    // Core properties
     public Collection $collection;
     public $criteria;
 
+    // Query modifiers
     protected ?array $projection = null;
     protected ?int $limit = null;
     protected ?int $skip = null;
     protected ?array $sort = null;
 
-    /* populate rules */
+    // Populate configuration
     protected array $populate = [];
 
+    /**
+     * Constructor.
+     */
     public function __construct(Collection $collection, $criteria, $projection = null, ?string $criteriaSql = null)
     {
         $this->collection = $collection;
@@ -29,39 +38,83 @@ class Cursor implements \IteratorAggregate
         $this->criteriaSql = $criteriaSql;
     }
 
-    /* ================= LEGACY ================= */
+    /* ================= LEGACY METHODS ================= */
 
+    /**
+     * Count documents matching the query.
+     */
     public function count(): int
     {
-        $table = $this->collection->database->quoteIdentifier($this->collection->name);
-        $sql = 'SELECT COUNT(*) c FROM '.$table;
-        $where = '';
-
-        if ($this->criteriaSql) {
-            $where = ' WHERE '.$this->criteriaSql;
-        } elseif ($this->criteria) {
-            $where = ' WHERE document_criteria("'.$this->criteria.'", document)';
-        }
-
-        if ($this->limit || $this->skip) {
-            $limit = $this->limit ? " LIMIT {$this->limit}" : ' LIMIT -1';
-            $offset = $this->skip ? " OFFSET {$this->skip}" : '';
-            $sql = "SELECT COUNT(*) c FROM (SELECT 1 FROM {$table}{$where}{$limit}{$offset})";
-        } else {
-            $sql .= $where;
-        }
-
         try {
-            $stmt = $this->collection->database->connection->query($sql);
-            $row = $stmt ? $stmt->fetch(\PDO::FETCH_ASSOC) : null;
-
-            return $row ? (int) $row['c'] : 0;
+            return $this->executeCountQuery();
         } catch (\PDOException $e) {
             // If the underlying table doesn't exist (dropped), treat as empty
             return 0;
         }
     }
 
+    /**
+     * Execute count query with proper handling of limit/skip.
+     */
+    private function executeCountQuery(): int
+    {
+        $table = $this->collection->database->quoteIdentifier($this->collection->name);
+        $sql = $this->buildCountSql($table);
+
+        $stmt = $this->collection->database->connection->query($sql);
+        $row = $stmt ? $stmt->fetch(\PDO::FETCH_ASSOC) : null;
+
+        return $row ? (int) $row['c'] : 0;
+    }
+
+    /**
+     * Build SQL for count query.
+     */
+    private function buildCountSql(string $table): string
+    {
+        $sql = 'SELECT COUNT(*) c FROM '.$table;
+        $where = $this->buildWhereClause();
+
+        if ($where) {
+            $sql .= ' WHERE '.$where;
+        }
+
+        if ($this->hasPagination()) {
+            $limit = $this->limit ? " LIMIT {$this->limit}" : ' LIMIT -1';
+            $offset = $this->skip ? " OFFSET {$this->skip}" : '';
+            $sql = "SELECT COUNT(*) c FROM (SELECT 1 FROM {$table}{$where}{$limit}{$offset})";
+        }
+
+        return $sql;
+    }
+
+    /**
+     * Build WHERE clause for criteria.
+     */
+    private function buildWhereClause(): string
+    {
+        if ($this->criteriaSql) {
+            return $this->criteriaSql;
+        }
+
+        if ($this->criteria) {
+            return 'document_criteria("'.$this->criteria.'", document)';
+        }
+
+        return '';
+    }
+
+    /**
+     * Check if pagination is applied.
+     */
+    private function hasPagination(): bool
+    {
+        return $this->limit || $this->skip;
+    }
+
+    /**
+     * Iterate over each document and apply callback.
+     */
     public function each($callable): self
     {
         $this->rewind();
@@ -73,8 +126,11 @@ class Cursor implements \IteratorAggregate
         return $this;
     }
 
-    /* ================= QUERY ================= */
+    /* ================= QUERY MODIFIERS ================= */
 
+    /**
+     * Set maximum number of documents to return.
+     */
     public function limit(int $limit): self
     {
         $this->limit = $limit;
@@ -82,6 +138,9 @@ class Cursor implements \IteratorAggregate
         return $this;
     }
 
+    /**
+     * Set number of documents to skip.
+     */
     public function skip(int $skip): self
     {
         $this->skip = $skip;
@@ -89,6 +148,9 @@ class Cursor implements \IteratorAggregate
         return $this;
     }
 
+    /**
+     * Set sort order for results.
+     */
     public function sort($sort): self
     {
         $this->sort = $sort;
@@ -98,6 +160,9 @@ class Cursor implements \IteratorAggregate
 
     /* ================= POPULATE API ================= */
 
+    /**
+     * Add population rule for a single relationship.
+     */
     public function populate(string $path, Collection $collection, array $options = []): self
     {
         $this->populate[] = compact('path', 'collection', 'options');
@@ -105,6 +170,9 @@ class Cursor implements \IteratorAggregate
         return $this;
     }
 
+    /**
+     * Add multiple population rules.
+     */
     public function populateMany(array $defs): self
     {
         foreach ($defs as $path => $def) {
@@ -118,6 +186,9 @@ class Cursor implements \IteratorAggregate
         return $this;
     }
 
+    /**
+     * Alternative populate API with fluent interface.
+     */
     public function with(string|array $path, ?Collection $collection = null, array $options = []): self
     {
         return is_array($path)
@@ -125,9 +196,26 @@ class Cursor implements \IteratorAggregate
             : $this->populate($path, $collection, $options);
     }
 
-    /* ================= OUTPUT ================= */
+    /* ================= OUTPUT METHODS ================= */
 
+    /**
+     * Convert cursor to array of documents.
+     */
     public function toArray(): array
+    {
+        $data = $this->fetchAllDocuments();
+
+        // Apply population rules
+        $data = $this->applyPopulationRules($data);
+
+        // Apply projection
+        return $this->applyProjection($data);
+    }
+
+    /**
+     * Fetch all documents from the cursor.
+     */
+    private function fetchAllDocuments(): array
     {
         $data = [];
         $this->rewind();
@@ -136,47 +224,92 @@ class Cursor implements \IteratorAggregate
             $this->next();
         }
 
+        return $data;
+    }
+
+    /**
+     * Apply population rules to documents.
+     */
+    private function applyPopulationRules(array $data): array
+    {
         foreach ($this->populate as $rule) {
             $data = $this->applyPopulate($data, $rule);
-        }
-
-        // Apply projection after populate so populate can rely on original fields
-        if ($this->projection) {
-            foreach ($data as &$doc) {
-                if (is_array($doc)) {
-                    $doc = $this->applyProjection($doc);
-                }
-            }
-            unset($doc);
         }
 
         return $data;
     }
 
-    /* ================= ITERATOR ================= */
+    /* ================= ITERATOR INTERFACE ================= */
 
-    public function rewind()
+    /**
+     * Reset cursor to beginning.
+     */
+    public function rewind(): void
     {
         $this->position = 0;
+        $this->executeQuery();
+    }
 
+    /**
+     * Execute the query and prepare first row.
+     */
+    private function executeQuery(): void
+    {
         $table = $this->collection->database->quoteIdentifier($this->collection->name);
+        $sql = $this->buildQuerySql($table);
 
+        $this->stmt = $this->collection->database->connection->query($sql);
+        $this->loadCurrentRow();
+    }
+
+    /**
+     * Build SQL query for cursor.
+     */
+    private function buildQuerySql(string $table): string
+    {
         $sql = ['SELECT document FROM '.$table];
 
-        if ($this->criteriaSql) {
-            $sql[] = 'WHERE '.$this->criteriaSql;
-        } elseif ($this->criteria) {
-            $sql[] = 'WHERE document_criteria("'.$this->criteria.'", document)';
+        // Add WHERE clause
+        $where = $this->buildWhereClause();
+        if ($where) {
+            $sql[] = 'WHERE '.$where;
         }
 
-        if ($this->sort) {
-            $orders = [];
-            foreach ($this->sort as $f => $d) {
-                $orders[] = 'document_key("'.$f.'", document) '.($d == -1 ? 'DESC' : 'ASC');
-            }
-            $sql[] = 'ORDER BY '.implode(',', $orders);
+        // Add ORDER BY clause
+        $orderBy = $this->buildOrderByClause();
+        if ($orderBy) {
+            $sql[] = $orderBy;
         }
 
+        // Add LIMIT and OFFSET
+        $this->addPaginationClauses($sql);
+
+        return implode(' ', $sql);
+    }
+
+    /**
+     * Build ORDER BY clause for sort criteria.
+     */
+    private function buildOrderByClause(): string
+    {
+        if (!$this->sort) {
+            return '';
+        }
+
+        $orders = [];
+        foreach ($this->sort as $field => $direction) {
+            $direction = $direction == -1 ? 'DESC' : 'ASC';
+            $orders[] = 'document_key("'.$field.'", document) '.$direction;
+        }
+
+        return 'ORDER BY '.implode(',', $orders);
+    }
+
+    /**
+     * Add LIMIT and OFFSET clauses to SQL.
+     */
+    private function addPaginationClauses(array &$sql): void
+    {
         if ($this->limit) {
             $sql[] = 'LIMIT '.$this->limit;
             if ($this->skip) {
@@ -185,14 +318,22 @@ class Cursor implements \IteratorAggregate
         } elseif ($this->skip) {
             $sql[] = 'LIMIT -1 OFFSET '.$this->skip;
         }
-
-        $this->stmt = $this->collection->database->connection->query(implode(' ', $sql));
-        $row = $this->stmt ? $this->stmt->fetch(\PDO::FETCH_ASSOC) : null;
-        $this->currentRow = $row ? $this->collection->decodeStored($row['document']) : null;
-        $this->lastKey = $this->currentRow ? 0 : -1;
     }
 
-    public function current()
+    /**
+     * Load current row from statement.
+     */
+    private function loadCurrentRow(): void
+    {
+        $row = $this->stmt ? $this->stmt->fetch(\PDO::FETCH_ASSOC) : null;
+        $this->currentRow = $row ? $this->collection->decodeStored($row['document']) : null;
+        $this->lastKey = $this->currentRow !== null ? $this->position : -1;
+    }
+
+    /**
+     * Get current document.
+     */
+    public function current(): ?array
     {
         if ($this->currentRow === null && $this->position === 0) {
             $this->rewind();
@@ -201,26 +342,38 @@ class Cursor implements \IteratorAggregate
         return $this->currentRow;
     }
 
-    public function key()
+    /**
+     * Get current position key.
+     */
+    public function key(): int
     {
-        return min($this->position, $this->lastKey);
+        if ($this->position === 0) {
+            return 0;
+        }
+
+        return $this->lastKey >= 0 ? $this->lastKey : $this->position - 1;
     }
 
-    public function next()
+    /**
+     * Move to next document.
+     */
+    public function next(): void
     {
         ++$this->position;
-        $row = $this->stmt ? $this->stmt->fetch(\PDO::FETCH_ASSOC) : null;
-        $this->currentRow = $row ? $this->collection->decodeStored($row['document']) : null;
-        if ($this->currentRow !== null) {
-            $this->lastKey = $this->position;
-        }
+        $this->loadCurrentRow();
     }
 
-    public function valid()
+    /**
+     * Check if current position is valid.
+     */
+    public function valid(): bool
     {
         return $this->currentRow !== null;
     }
 
+    /**
+     * Get iterator for foreach loops.
+     */
     public function getIterator(): \Traversable
     {
         $this->rewind();
@@ -230,30 +383,68 @@ class Cursor implements \IteratorAggregate
         }
     }
 
-    /* ================= POPULATE CORE ================= */
+    /* ================= POPULATION CORE ================= */
 
+    /**
+     * Apply a single population rule to data.
+     */
     protected function applyPopulate(array $data, array $rule): array
     {
         $segments = explode('.', $rule['path']);
         $as = $rule['options']['as'] ?? preg_replace('/_id$/', '', end($segments));
         $collection = $rule['collection'];
 
+        $ids = $this->collectIdsFromData($data, $segments);
+
+        if (empty($ids)) {
+            return $data;
+        }
+
+        $relatedDocuments = $this->fetchRelatedDocuments($collection, $ids);
+        $documentMap = $this->buildDocumentMap($relatedDocuments);
+
+        return $this->injectDocuments($data, $segments, $documentMap, $as);
+    }
+
+    /**
+     * Collect IDs from data based on path segments.
+     */
+    private function collectIdsFromData(array $data, array $segments): array
+    {
         $ids = [];
         foreach ($data as $doc) {
             $this->collectIds($doc, $segments, $ids);
         }
 
-        $ids = array_unique($ids);
-        if (!$ids) {
-            return $data;
-        }
+        return array_unique($ids);
+    }
 
-        $related = $collection->find(['_id' => ['$in' => $ids]])->toArray();
+    /**
+     * Fetch related documents from collection.
+     */
+    private function fetchRelatedDocuments(Collection $collection, array $ids): array
+    {
+        return $collection->find(['_id' => ['$in' => $ids]])->toArray();
+    }
+
+    /**
+     * Build map of related documents by ID.
+     */
+    private function buildDocumentMap(array $relatedDocuments): array
+    {
         $map = [];
-        foreach ($related as $r) {
-            $map[$r['_id']] = $r;
+        foreach ($relatedDocuments as $doc) {
+            $map[$doc['_id']] = $doc;
         }
 
+        return $map;
+    }
+
+    /**
+     * Inject related documents into main data.
+     */
+    private function injectDocuments(array $data, array $segments, array $map, string $as): array
+    {
         foreach ($data as &$doc) {
             $this->inject($doc, $segments, $map, $as);
         }
@@ -261,72 +452,141 @@ class Cursor implements \IteratorAggregate
         return $data;
     }
 
-    protected function collectIds($node, $path, &$ids, $i = 0)
+    /**
+     * Collect IDs from a node recursively.
+     */
+    protected function collectIds($node, array $path, array &$ids, int $index = 0): void
     {
-        if (!is_array($node) || !isset($path[$i]) || !isset($node[$path[$i]])) {
+        if (!$this->isValidPathNode($node, $path, $index)) {
             return;
         }
-        if ($i === count($path) - 1) {
-            $ids[] = $node[$path[$i]];
+
+        if ($this->isFinalPathSegment($path, $index)) {
+            $ids[] = $node[$path[$index]];
 
             return;
         }
-        foreach ($node[$path[$i]] as $child) {
-            $this->collectIds($child, $path, $ids, $i + 1);
+
+        foreach ($node[$path[$index]] as $child) {
+            $this->collectIds($child, $path, $ids, $index + 1);
         }
     }
 
-    protected function inject(&$node, $path, $map, $as, $i = 0)
+    /**
+     * Check if path node is valid.
+     */
+    private function isValidPathNode($node, array $path, int $index): bool
     {
-        if (!isset($path[$i]) || !isset($node[$path[$i]])) {
+        return is_array($node)
+               && isset($path[$index])
+               && isset($node[$path[$index]]);
+    }
+
+    /**
+     * Check if current index is the final path segment.
+     */
+    private function isFinalPathSegment(array $path, int $index): bool
+    {
+        return $index === count($path) - 1;
+    }
+
+    /**
+     * Inject related document into node.
+     */
+    protected function inject(&$node, array $path, array $map, string $as, int $index = 0): void
+    {
+        if (!$this->isValidPathNode($node, $path, $index)) {
             return;
         }
 
-        if ($i === count($path) - 1) {
-            $node[$as] = $map[$node[$path[$i]]] ?? null;
+        if ($this->isFinalPathSegment($path, $index)) {
+            $node[$as] = $map[$node[$path[$index]]] ?? null;
 
             return;
         }
 
-        foreach ($node[$path[$i]] as &$child) {
+        foreach ($node[$path[$index]] as &$child) {
             if (is_array($child)) {
-                $this->inject($child, $path, $map, $as, $i + 1);
+                $this->inject($child, $path, $map, $as, $index + 1);
             }
         }
     }
 
-    protected function applyProjection(array $doc): array
+    /**
+     * Apply projection to documents.
+     */
+    protected function applyProjection(array $data): array
     {
-        $proj = $this->projection;
+        if (!$this->projection) {
+            return $data;
+        }
 
-        // Determine mode: include (any value == 1) or exclude (all values == 0)
-        $inclusive = false;
-        foreach ($proj as $k => $v) {
-            if ($v) {
-                $inclusive = true;
-                break;
+        $isInclusive = $this->isInclusiveProjection();
+
+        foreach ($data as &$doc) {
+            if (is_array($doc)) {
+                $doc = $this->applyProjectionToDocument($doc, $isInclusive);
+            }
+        }
+
+        return $data;
+    }
+
+    /**
+     * Check if projection is inclusive (include fields).
+     */
+    private function isInclusiveProjection(): bool
+    {
+        foreach ($this->projection as $value) {
+            if ($value) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Apply projection to a single document.
+     */
+    private function applyProjectionToDocument(array $doc, bool $isInclusive): array
+    {
+        if ($isInclusive) {
+            return $this->applyInclusiveProjection($doc);
+        } else {
+            return $this->applyExclusiveProjection($doc);
+        }
+    }
+
+    /**
+     * Apply inclusive projection (include specified fields).
+     */
+    private function applyInclusiveProjection(array $doc): array
+    {
+        $result = [];
+
+        foreach ($this->projection as $field => $include) {
+            if ($include && array_key_exists($field, $doc)) {
+                $result[$field] = $doc[$field];
             }
         }
 
         // Always include _id when doing inclusion
-        if ($inclusive) {
-            $result = [];
-            foreach ($proj as $k => $v) {
-                if ($v && array_key_exists($k, $doc)) {
-                    $result[$k] = $doc[$k];
-                }
-            }
-            if (array_key_exists('_id', $doc)) {
-                $result['_id'] = $doc['_id'];
-            }
-
-            return $result;
+        if (array_key_exists('_id', $doc)) {
+            $result['_id'] = $doc['_id'];
         }
 
-        // Exclusion mode: remove keys with value == 0
-        foreach ($proj as $k => $v) {
-            if ($v === 0 && array_key_exists($k, $doc)) {
-                unset($doc[$k]);
+        return $result;
+    }
+
+    /**
+     * Apply exclusive projection (exclude specified fields).
+     */
+    private function applyExclusiveProjection(array $doc): array
+    {
+        foreach ($this->projection as $field => $exclude) {
+            if ($exclude === 0 && array_key_exists($field, $doc)) {
+                unset($doc[$field]);
             }
         }
 

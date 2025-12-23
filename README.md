@@ -17,10 +17,26 @@ Ideal for applications that need a MongoDB-like API without the overhead of main
 
 ## 📦 Installation
 
+### Via Composer (Recommended)
+
 ```bash
 composer require bangron-work/pocketdb
-
 ```
+
+### From GitHub
+
+```bash
+# Clone the repository
+git clone https://github.com/bangron-work/PocketDB.git
+cd PocketDB
+
+# Include in your project
+require_once 'src/Client.php';
+```
+
+**GitHub Repository:** https://github.com/bangron-work/PocketDB
+
+**Documentation:** [Full Documentation](docs/index.md)
 
 ## ⚡ Quick Start
 
