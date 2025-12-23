@@ -2,6 +2,7 @@
     "name": "bangron-work/pocketdb",
     "description": "MongoDB-like interface to SQLite",
     "type": "library",
+    "version": "1.0.1",
     "require": {
         "php": ">=8.0",
         "ext-pdo": "*",
